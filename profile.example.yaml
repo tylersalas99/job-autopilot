@@ -1,0 +1,106 @@
+# ============================================================
+# PROFILE STORE TEMPLATE — copy this to profile.yaml and fill
+# in your own details. profile.yaml is gitignored; it holds PII
+# (name, contact info, address, demographics) and must never be
+# committed.
+# ============================================================
+
+identity:
+  full_name: Jane Doe
+  first_name: Jane
+  last_name: Doe
+  email: jane.doe@example.com
+  phone: "555-555-5555"
+  location: Anytown, TX
+  city: Anytown
+  state: TX
+  state_full: Texas         # Workday state dropdowns list full names, not "TX"
+  country: United States
+  address_line1: "123 Main St"
+  postal_code: "00000"
+  linkedin: https://www.linkedin.com/in/your-handle/
+  github: https://github.com/your-handle
+  portfolio: https://github.com/your-handle
+  twitter: "None"
+
+# Two resume tracks. The tailoring step classifies each JD and picks one.
+# Add/rename tracks to match the roles you're targeting.
+tracks:
+  swe:
+    label: Software Engineering
+    summary: >-
+      One or two sentences summarizing your background for this track.
+    skills:
+      Languages: [Python, JavaScript]
+      Frameworks & Libraries: [FastAPI, React]
+      Infrastructure & DevOps: [Docker, Git]
+      Data & Enterprise: [SQL, Jira]
+    project_order: [example_project]
+
+work_history:
+  - company: Example Corp
+    title: Software Engineer
+    location: Anytown, TX
+    start: 2022-01
+    end: present
+    bullets:
+      - id: example_bullet
+        text: >-
+          Description of an accomplishment, written so it can be reordered
+          and lightly rephrased by the tailoring step without changing facts.
+        tags: [python, automation]
+
+projects:
+  example_project:
+    name: Example Project
+    stack: [Python, Docker]
+    bullets:
+      - >-
+        One or two bullets describing the project.
+    tags: [python, docker]
+
+education:
+  - degree: B.S. in Computer Science
+    school: Example University
+    school_aliases: []        # option-text variants seen in ATS school pickers
+    started: 2018-08
+    graduated: 2022-05
+
+# ----- Standard answers used to fill application forms -----
+standard_answers:
+  citizenship: "US citizen"
+  work_authorization: "Yes — US citizen, authorized to work in the United States"
+  require_sponsorship: false
+  willing_to_relocate: true
+  relocate_without_assistance: true
+  relocation_answer: >-
+    I am currently located in Anytown, TX, and I am willing to relocate.
+  remote_preference: "Hybrid or remote preferred; open to relocation"
+  salary_expectation:
+    min: 0
+    max: 0
+    text_answer: "Negotiable"
+    disclose_rule: only_if_required   # numbers used ONLY when a numeric field is mandatory
+  notice_period: "2 weeks"
+  earliest_start_date: "2 weeks from offer acceptance"
+  over_18: true
+  veteran_status: "I am not a protected veteran"
+  disability_status: "No, I do not have a disability"
+  gender: "Prefer not to say"
+  pronouns: "They/them"
+  transgender: "Prefer not to say"
+  race_ethnicity: "Prefer not to say"
+  age: 0
+  demographic_communities: "None of the above"
+  how_did_you_hear: "Company careers page"
+  criminal_history: "No"
+  has_noncompete: false
+  sms_opt_in: false
+
+# ----- Filters applied before any work happens -----
+exclusion_rules:
+  companies_blocklist: []          # e.g. ["Current Employer Inc"]
+  title_must_match_any: []         # empty = allow all titles
+  keywords_reject: []              # e.g. ["onsite only", "Top Secret clearance"]
+  min_salary_reject_below: null    # reject postings listing max salary below this
+  skip_if_applied_within_days: 90

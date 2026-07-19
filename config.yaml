@@ -1,0 +1,33 @@
+# Application settings (non-personal). Personal data lives in profile.yaml.
+
+anthropic:
+  model: claude-sonnet-4-6
+  max_tokens: 4000
+  max_retries: 5              # retries on 429/5xx/connection errors, with
+                              # exponential backoff (honors Retry-After)
+  # API key is read from the ANTHROPIC_API_KEY environment variable — never store it here.
+
+paths:
+  output_dir: output          # tailored documents, one folder per application
+  pending_dir: pending        # escalated applications awaiting your attention
+  db_path: tracking/applications.db
+  browser_profile: browser_profile
+  workday_accounts: workday_accounts.json   # per-tenant Workday credentials
+                                            # (auto-created; gitignored; chmod 600)
+
+automation:
+  headless: false             # keep false initially so you can watch runs
+  human_delay_ms: [900, 2800] # random delay range between form actions
+                              # (raised 2026-07-12: slower, more human pacing
+                              #  → fewer risk-based captcha challenges)
+  essay_policy: review        # review | hold | submit
+                              #   review: pause IN the terminal at each held question —
+                              #           accept/edit/type the answer, run continues
+                              #           (falls back to hold when no terminal, e.g. phone runs)
+                              #   hold:   escalate to pending/ with editable approved_answers.json
+                              #   submit: use Claude's drafts unreviewed (not recommended)
+  supervised_mode: true       # true = pause before final submit click (turn off once trusted)
+
+notifications:
+  method: console             # console | ntfy
+  ntfy_topic: null            # e.g. "tyler-job-autopilot" if using https://ntfy.sh

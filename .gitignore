@@ -1,0 +1,14 @@
+browser_profile/
+output/
+pending/
+tracking/*.db
+tracking/*.db-journal
+workday_accounts.json
+__pycache__/
+.env
+.venv/
+.pytest_cache/
+.DS_Store
+
+# Personal data — name, email, phone, home address, credentials
+profile.yaml
