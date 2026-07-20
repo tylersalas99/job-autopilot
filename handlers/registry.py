@@ -4,6 +4,7 @@ from __future__ import annotations
 from handlers.ashby import AshbyHandler
 from handlers.greenhouse import GreenhouseHandler
 from handlers.lever import LeverHandler
+from handlers.smartrecruiters import SmartRecruitersHandler
 from handlers.workday import WorkdayHandler
 
 REGISTRY = {
@@ -11,6 +12,7 @@ REGISTRY = {
     "lever": LeverHandler,
     "ashby": AshbyHandler,
     "workday": WorkdayHandler,
+    "smartrecruiters": SmartRecruitersHandler,
 }
 
 

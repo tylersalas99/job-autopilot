@@ -24,6 +24,11 @@ CAPTCHA_MARKERS = ["recaptcha", "hcaptcha", "h-captcha", "cf-turnstile", "captch
 # Placeholder option texts that mean "nothing selected yet"
 _PLACEHOLDER_OPTION = re.compile(r"^(--+|select|please select|choose|pick one)\b|^\s*$", re.I)
 
+# Optional choice fields to leave untouched entirely — never answered, never
+# held. Suffix is optional and Tyler has none (2026-07-19); answering/holding
+# it just stalls the run.
+_IGNORE_CHOICE_RE = re.compile(r"\bsuffix\b", re.I)
+
 # "How did you hear about us?" in any phrasing
 _HEAR_ABOUT_RE = re.compile(r"how did you (hear|find)|hear about|referr", re.I)
 
@@ -130,6 +135,14 @@ class BaseHandler:
             (r"city", ident["city"]),
             (r"location", ident["location"]),
             (r"notice\s*period", std.get("notice_period")),
+            (r"preferred\s*(method\s*of\s*)?contact|(preferred\s*)?contact\s*method|"
+             r"how.*prefer.*(be\s*)?contact", std.get("preferred_contact_method")),
+            # Compensation/salary free-text fields → "Negotiable" (per Tyler
+            # 2026-07-19). Numeric-only inputs are excluded (a text value throws
+            # on type=number), matching the start-date year/month handling.
+            (r"salary|compensation|desired\s*pay|pay\s*expectation|"
+             r"expected\s*(pay|rate|compensation)|desired\s*rate",
+             (std.get("salary_expectation") or {}).get("text_answer")),
             # Education-section "Start date year"/"month" fields must never
             # get the earliest-start-date sentence (type=number inputs throw
             # on text) — hence the year/month lookahead exclusion.
@@ -200,6 +213,8 @@ class BaseHandler:
             # MUST stay below the over-18 row ("...18 years of AGE?").
             # Range options ("25-34") resolve via age_option_index.
             (r"\bage\b|how old", std.get("age")),
+            (r"preferred\s*(method\s*of\s*)?contact|(preferred\s*)?contact\s*method|"
+             r"how.*prefer.*(be\s*)?contact", std.get("preferred_contact_method")),
             (r"how did you (hear|find)|hear about|referr", std.get("how_did_you_hear")),
             (r"felony|criminal|convict", std.get("criminal_history")),
             # "Have you ever been involuntarily discharged or asked to
@@ -233,15 +248,23 @@ class BaseHandler:
                 if o == want or o.startswith(want + " ") or o.startswith(want + ","):
                     return i
             return None  # never substring-match a bare yes/no — too risky
-        for i, o in enumerate(norm):
-            if d in o or o in d:
-                return i
+        # Substring matches: when several options contain the desired string
+        # ("United States" is a prefix of both "United States of America" and
+        # "United States Minor Outlying Islands"), returning the first hit
+        # picks whichever sorts earliest — wrong. Prefer the option closest in
+        # length to the desired text (the tightest superset).
+        containing = [i for i, o in enumerate(norm) if d in o]
+        if containing:
+            return min(containing, key=lambda i: len(norm[i]))
+        contained = [i for i, o in enumerate(norm) if o in d]
+        if contained:
+            return max(contained, key=lambda i: len(norm[i]))
         # Space-insensitive last resort ("US citizen" vs "U.S. Citizen")
         d_tight = d.replace(" ", "")
-        for i, o in enumerate(norm):
-            o_tight = o.replace(" ", "")
-            if d_tight in o_tight or o_tight in d_tight:
-                return i
+        tight = [i for i, o in enumerate(norm)
+                 if d_tight in o.replace(" ", "") or o.replace(" ", "") in d_tight]
+        if tight:
+            return min(tight, key=lambda i: abs(len(norm[i].replace(" ", "")) - len(d_tight)))
         return None
 
     _STOP_TOKENS = {"the", "of", "at", "in", "and"}
@@ -439,6 +462,8 @@ class BaseHandler:
             question = self.field_label(page, sel)
             if not question:
                 continue
+            if _IGNORE_CHOICE_RE.search(question):
+                continue  # optional field left blank (e.g. Suffix)
             res = self.answer_choice(question, [t for _, t in real])
             if res["hold"] or res["value"] is None:
                 held.append({"question": question, "options": [t for _, t in real],
@@ -609,6 +634,10 @@ class BaseHandler:
 
     _CONSENT_RE = re.compile(
         r"i (agree|certify|acknowledge|consent|understand)|by (clicking|submitting)"
+        # "Yes, I have read and consent to the terms and conditions."
+        # (justfab Workday 2026-07-19) — neither "i consent" adjacency nor
+        # "terms of service" matched, so the required box stayed unticked.
+        r"|(read|reviewed) and (consent|agree)|terms and conditions"
         r"|privacy policy|terms of service|statements .* true", re.IGNORECASE)
 
     def handle_consent_checkboxes(self, page) -> None:
@@ -638,7 +667,16 @@ class BaseHandler:
                     }""") or ""
                 context = " ".join(context.split())
                 if self._CONSENT_RE.search(context):
-                    cb.check()
+                    try:
+                        cb.check(timeout=5000)
+                    except Exception:
+                        # Workday's styled checkboxes hide the input behind
+                        # overlay spans — check() can time out; click the
+                        # associated label like a human (justfab 2026-07-19).
+                        cb.evaluate(
+                            "el => { const l = el.closest('label') || (el.id &&"
+                            " document.querySelector(`label[for=\"${el.id}\"]`));"
+                            " (l || el).click(); }")
                     self.pause()
             except Exception:
                 continue

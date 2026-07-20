@@ -40,7 +40,7 @@ ATS_HTML_MARKERS = [
     ("myworkdayjobs.com", "workday"),
 ]
 
-SUPPORTED_ATS = {"greenhouse", "lever", "ashby", "workday"}
+SUPPORTED_ATS = {"greenhouse", "lever", "ashby", "workday", "smartrecruiters"}
 BLOCKED_ATS = {"linkedin"}      # policy: never automate LinkedIn
 
 
@@ -134,6 +134,10 @@ def workday_api_url(url: str) -> str | None:
     segs = [s for s in p.path.split("/") if s]
     if segs and re.fullmatch(r"[a-z]{2}-[a-z]{2}", segs[0], re.IGNORECASE):
         segs = segs[1:]  # optional locale segment (en-US)
+    # Drop a trailing /apply (or /apply/...) — the apply flow shares the job
+    # path but the CXS job endpoint 404s/empties when it's kept.
+    if segs and segs[-1].lower() == "apply":
+        segs = segs[:-1]
     if len(segs) < 3 or segs[1] != "job":
         return None
     site, rest = segs[0], "/".join(segs[2:])
@@ -176,6 +180,86 @@ def _enrich_workday(posting: Posting) -> None:
     org = (data.get("hiringOrganization") or {}).get("name")
     if org:
         posting.company = _clean(org)
+
+
+def smartrecruiters_ids(url: str) -> tuple[str, str] | None:
+    """(companyIdentifier, postingId) from a SmartRecruiters posting URL.
+
+    https://jobs.smartrecruiters.com/Visa/744000133907678-sr-manager
+    → ("Visa", "744000133907678")
+    Careers-site URLs (careers.smartrecruiters.com/<Company>) carry no
+    posting id — those return None.
+    """
+    p = urlparse(url)
+    if not re.search(r"(^|\.)smartrecruiters\.com$", p.netloc, re.IGNORECASE):
+        return None
+    m = re.match(r"/([^/]+)/(\d+)(?:-|$)", p.path)
+    if not m:
+        return None
+    return m.group(1), m.group(2)
+
+
+def smartrecruiters_api_url(url: str) -> str | None:
+    """Public posting API — no auth needed. Returns title/company/location,
+    the full job ad, active-ness, AND the publication `uuid` that the apply
+    form URL is built from."""
+    ids = smartrecruiters_ids(url)
+    if not ids:
+        return None
+    company, posting_id = ids
+    return f"https://api.smartrecruiters.com/v1/companies/{company}/postings/{posting_id}"
+
+
+def smartrecruiters_apply_url(company_identifier: str, publication_uuid: str) -> str:
+    """The oneclick-ui "Easy Apply" form URL. The posting API's `uuid` IS
+    the publication UUID (verified live against Visa 2026-07-19), so the
+    handler never has to find and click "I'm interested"."""
+    return (f"https://jobs.smartrecruiters.com/oneclick-ui/company/"
+            f"{company_identifier}/publication/{publication_uuid}"
+            f"?dcr_ci={company_identifier}")
+
+
+def _enrich_smartrecruiters(posting: Posting) -> None:
+    """Fill title/company/location/description from the public posting API
+    and rewrite final_url to the oneclick-ui apply form. Fail-soft: on any
+    problem the job-page URL stays and the handler falls back to clicking
+    "I'm interested"."""
+    api = smartrecruiters_api_url(posting.final_url) \
+        or smartrecruiters_api_url(posting.url)
+    if not api:
+        return
+    try:
+        resp = requests.get(api, headers={**HEADERS, "Accept": "application/json"},
+                            timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        posting.warnings.append(
+            "SmartRecruiters API lookup failed — the handler will click "
+            "\"I'm interested\" to reach the form.")
+        return
+    if data.get("name"):
+        posting.title = _clean(data["name"])
+    org = (data.get("company") or {}).get("name")
+    if org:
+        posting.company = _clean(org)
+    loc = (data.get("location") or {}).get("fullLocation")
+    if loc:
+        posting.location = _clean(str(loc))
+    sections = (data.get("jobAd") or {}).get("sections") or {}
+    parts = []
+    for sec in sections.values():
+        if isinstance(sec, dict) and sec.get("text"):
+            parts.append(BeautifulSoup(sec["text"], "html.parser").get_text(" "))
+    if parts:
+        posting.description = _clean(" ".join(parts))
+    if data.get("active") is False:
+        posting.closed = True
+        posting.warnings.append(
+            "Posting appears CLOSED — SmartRecruiters API reports it inactive.")
+    ids = smartrecruiters_ids(posting.final_url) or smartrecruiters_ids(posting.url)
+    if ids and data.get("uuid"):
+        posting.final_url = smartrecruiters_apply_url(ids[0], data["uuid"])
 
 
 def _extract_generic(soup: BeautifulSoup, posting: Posting) -> None:
@@ -245,6 +329,10 @@ def fetch_posting(url: str, timeout: int = 30) -> Posting:
             if not posting.company:
                 posting.company = company_from_workday_url(final_url)
             _enrich_workday(posting)
+        if ats == "smartrecruiters":
+            if not posting.company:
+                posting.company = company_from_path_slug(final_url)
+            _enrich_smartrecruiters(posting)
     if not posting.description or len(posting.description) < 200:
         posting.warnings.append(
             "Job description extraction looks thin — page may be JS-rendered; "

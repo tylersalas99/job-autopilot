@@ -16,6 +16,16 @@ tenants and wd1/wd3/wd5 pods, unlike Workday's obfuscated CSS classes):
   ``applyManually`` / ``useMyLastApplication``. We take Autofill with
   Resume (user 2026-07-18): upload the tailored PDF, Workday parses it and
   pre-fills My Experience.
+- Auth, SSO-chooser variant (justfab/Fabletics wd1, live capture 2026-07-19):
+  some tenants show an SSO chooser FIRST — buttons ``GoogleSignInButton`` /
+  ``LinkedInSignInButton`` / ``SignInWithEmailButton`` and NO email/password
+  inputs. ``SignInWithEmailButton`` reveals the standard sign-in form below
+  (same automation ids); ``_reach_application`` clicks it whenever it is
+  visible and no password field is. The revealed forms also carry a
+  ``beecatcher`` input — a 1px-high honeypot that offsetParent treats as
+  visible. NEVER fill auth inputs generically; fill only the exact
+  automation ids (email/password/verifyPassword) so the honeypot stays
+  empty.
 - Auth: ``input[data-automation-id='email'|'password'|'verifyPassword']``,
   ``[data-automation-id='createAccountCheckbox']`` (terms),
   links ``createAccountLink``/``signInLink`` toggle the two forms. The
@@ -28,6 +38,10 @@ tenants and wd1/wd3/wd5 pods, unlike Workday's obfuscated CSS classes):
   after 30s (Red Hat shakeout 2026-07-18). Always click the overlay
   (``_click_submit_control``); the password is saved to the accounts
   file BEFORE the click so a mid-creation crash can't lose it.
+  Overlay aria-label varies by tenant: usually the button text, but
+  justfab wd1's SIGN-IN overlay says "Submit" (its create-account overlay
+  still says "Create Account") — ``_click_submit_control`` tries the
+  label, then "Submit", then the raw button.
 - Wizard: pages My Information → My Experience → Application Questions →
   Voluntary Disclosures → Self Identify → Review. Footer
   ``pageFooterNextButton`` advances ("Save and Continue" / "Continue" /
@@ -71,12 +85,24 @@ tenants and wd1/wd3/wd5 pods, unlike Workday's obfuscated CSS classes):
   queries "careers" → "company website"); anything else is left alone —
   if Workday requires it, the error-banner path escalates with the
   banner text rather than typing guesses into an open search.
+- Checkbox GROUPS (justfab Voluntary Disclosures 2026-07-19): a required
+  multi-checkbox question ("Please select all ethnicities that apply.",
+  ``formField-ethnicityMulti``) renders NAMELESS ``input[type=checkbox]``es
+  inside ONE formField wrapper, options as ``label[for=<input id>]`` —
+  base's same-name grouping is blind to them (``handle_wd_checkbox_groups``).
+  The bottom "read and consent to the terms and conditions" box
+  (``formField-acceptTermsAndAgreements``) is a singleton for the base
+  consent handler — its phrasing and Workday's styled overlay both needed
+  base-side fixes (regex + label-click fallback), see base.py.
 - Dates: ``dateSectionMonth-input``/``Day``/``Year`` spinbutton inputs.
   Only the Self Identify / Voluntary Disclosures signature date is
   filled (today); experience dates come from resume autofill.
 - Field labels: inputs live in ``[data-automation-id^='formField']``
   wrappers carrying the real <label> — base field_label's class-based
-  fallback can't see through Workday's obfuscated classes.
+  fallback can't see through Workday's obfuscated classes. Questionnaire
+  formFields (justfab 2026-07-19) have NO <label>: the question text is a
+  ``[data-automation-id='richText']`` div under ``[id^='rich-label']`` /
+  ``[id='label-…']`` — ``_wd_label`` falls back to it.
 - Resume upload: ``input[data-automation-id='file-upload-input-ref']``
   (a real file input). Upload is idempotent per page: skipped when the
   resume filename already appears in the page.
@@ -99,10 +125,20 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-from handlers.base import _HEAR_ABOUT_RE, _PLACEHOLDER_OPTION, BaseHandler, RunResult
+from handlers.base import (_HEAR_ABOUT_RE, _IGNORE_CHOICE_RE, _PLACEHOLDER_OPTION,
+                           BaseHandler, RunResult)
 
 # Dropdown button text that means "nothing chosen yet"
 _WD_PLACEHOLDER = re.compile(r"^(select one|select|search)?$", re.I)
+
+# Our resume's section headers (render.py h2s, uppercased by its CSS).
+# Workday's parse lumps everything between a job's last bullet and the next
+# thing it recognizes into Role Description — justfab 2026-07-19 stuffed the
+# ENTIRE Projects section into the final Experience entry (Lugo). A line
+# that is exactly one of these headers marks where the leak starts.
+_RESUME_SECTION_RE = re.compile(
+    r"^\s*(PROJECTS|EDUCATION|TECHNICAL SKILLS|SKILLS|EXPERIENCE|"
+    r"CERTIFICATIONS?)\s*$", re.M)
 
 _CONFIRMATION_MARKERS = (
     "successfully applied",
@@ -179,10 +215,14 @@ class WorkdayHandler(BaseHandler):
             return std.get("race_ethnicity")
         if re.search(r"opt.?in.*(text|sms)|text.*opt.?in", q):
             return "Yes" if std.get("sms_opt_in", True) else "No"
-        # "Have you ever worked for Red Hat?" (Red Hat 2026-07-18) — the
-        # (for|at|by) tail keeps questionnaire asks like "How long have you
-        # worked WITH Python?" out of this row.
-        if re.search(r"(ever|previous(?:ly)?).{0,30}(worked|employed|been employed)"
+        # "Have you ever worked for Red Hat?" (Red Hat 2026-07-18);
+        # "Have you at any time worked for TechStyle..." (justfab
+        # 2026-07-19 — answered Yes via the Claude fallback because this
+        # row only knew ever/previously; user: ANY worked-for-company
+        # question answers No). The (for|at|by) tail keeps questionnaire
+        # asks like "How long have you worked WITH Python?" out of this row.
+        if re.search(r"(ever|previous(?:ly)?|at any time|in the past)"
+                     r".{0,30}(worked|employed|been employed)"
                      r"\s+(for|at|by|here)|"
                      r"currently (employed|work(?:ing)?)\s*(by|for|at)|"
                      r"former (employee|worker|associate)", q):
@@ -214,10 +254,19 @@ class WorkdayHandler(BaseHandler):
         """Label via the formField wrapper — Workday's CSS classes are
         obfuscated, so base field_label's [class*=field] fallback is blind."""
         try:
+            # Questionnaire formFields (justfab 2026-07-19) carry NO
+            # <label> — the question text is a richText div under a
+            # [id^='rich-label']/[id='label-…'] sibling. Without this
+            # fallback the button's own aria-label ("Select One Required")
+            # became the question and no standing answer could match.
             text = el.evaluate(
                 "el => { const f = el.closest(\"[data-automation-id^='formField']\");"
-                " const l = f && f.querySelector('label');"
-                " return l ? l.innerText : ''; }")
+                " if (!f) return '';"
+                " const l = f.querySelector('label');"
+                " if (l && l.innerText.trim()) return l.innerText;"
+                " const r = f.querySelector(\"[data-automation-id='richText'],"
+                " [id^='rich-label'], [id^='label-']\");"
+                " return r ? r.innerText : ''; }")
             # required-marker abbr renders as a trailing "*" in innerText
             return " ".join((text or "").split()).rstrip("*").strip()
         except Exception:
@@ -297,12 +346,51 @@ class WorkdayHandler(BaseHandler):
                 continue
         return out[:8]
 
+    def _error_interstitial(self, page) -> bool:
+        """Workday's transient crash page: 'Something went wrong / Please
+        refresh the page and then try again.' (justfab 2026-07-19, shown on
+        My Information right after sign-in). No form content renders —
+        requiring the phrase AND the absence of formFields keeps a
+        validation banner on a real page from ever matching."""
+        try:
+            if page.query_selector("[data-automation-id^='formField']"):
+                return False
+            body = page.query_selector("body")
+            text = " ".join((body.inner_text() or "").split()) if body else ""
+        except Exception:
+            return False
+        return bool(re.search(r"something went wrong.{0,120}?refresh the page",
+                              text, re.I))
+
+    def _maybe_refresh_error_page(self, page) -> bool:
+        """Reload when the interstitial shows, as the page itself asks.
+        Bounded per run — a page that keeps crashing goes to the normal
+        escalate→pause→retry path instead of a reload loop."""
+        if not self._error_interstitial(page):
+            return False
+        self._error_refreshes = getattr(self, "_error_refreshes", 0) + 1
+        if self._error_refreshes > 3:
+            return False
+        print("  ↻ Workday 'Something went wrong' page — refreshing "
+              f"({self._error_refreshes}/3)")
+        page.reload(wait_until="domcontentloaded")
+        page.wait_for_timeout(3000)
+        return True
+
     def _on_wizard(self, page) -> bool:
         # The AUTH page also renders the progress bar — its step 1 is
         # "Create Account/Sign In" (Travelers 2026-07-18), and the bar can
         # render before the form inputs. A visible password field always
-        # means auth, never the wizard.
+        # means auth, never the wizard. SSO-chooser tenants (justfab wd1,
+        # 2026-07-19) have NO password field on their auth step and the
+        # chooser buttons render LATER than the bar, so probing for them
+        # races and loses (that run walked into the wizard loop on the
+        # chooser page and escalated "No Save and Continue"). The bar's
+        # own active-step text is the deterministic tell.
         if self._password_input(page):
+            return False
+        step = self._page_step(page)
+        if re.search(r"create account|sign.?in", step, re.I):
             return False
         return bool(page.query_selector("[data-automation-id='progressBar']")
                     or page.query_selector("[data-automation-id='pageFooterNextButton']"))
@@ -310,7 +398,16 @@ class WorkdayHandler(BaseHandler):
     # ---------- auth ----------
     @staticmethod
     def _password_input(page):
-        for el in page.query_selector_all("input[data-automation-id='password']"):
+        # The post-auth redirect chain destroys the execution context while
+        # _auth_settled is polling this (justfab crash 2026-07-19:
+        # "Page.query_selector_all: Execution context was destroyed"). A
+        # vanished DOM means the password field is gone — exactly the
+        # success signal _auth_settled is waiting for.
+        try:
+            els = page.query_selector_all("input[data-automation-id='password']")
+        except Exception:
+            return None
+        for el in els:
             try:
                 if el.is_visible():
                     return el
@@ -355,6 +452,12 @@ class WorkdayHandler(BaseHandler):
         only when no overlay exists."""
         overlay = self._visible(
             page, f"[data-automation-id='click_filter'][aria-label='{label}']")
+        if not overlay:
+            # justfab wd1 (2026-07-19): the sign-in form's overlay is
+            # labeled "Submit", not the button text. Only one auth form is
+            # visible at a time, so the generic label is unambiguous.
+            overlay = self._visible(
+                page, "[data-automation-id='click_filter'][aria-label='Submit']")
         if overlay:
             overlay.click()
             self.pause()
@@ -496,31 +599,50 @@ class WorkdayHandler(BaseHandler):
         order varies by tenant (some demand sign-in before showing the
         options), so this is a small state loop, not a fixed sequence."""
         for _ in range(8):
-            self._dismiss_cookie_banner(page)
-            if self._sign_in_form_present(page):
-                res = self.ensure_authenticated(page)
+            # DOM probes race the auth/redirect chain: any query can throw
+            # "Execution context was destroyed" mid-navigation (justfab
+            # 2026-07-19 crashed here right after account creation). Wait
+            # out the navigation and retry the pass — state detection is
+            # idempotent by design.
+            try:
+                self._dismiss_cookie_banner(page)
+                if self._maybe_refresh_error_page(page):
+                    continue
+                if self._sign_in_form_present(page):
+                    res = self.ensure_authenticated(page)
+                    if res:
+                        return res
+                    page.wait_for_timeout(2000)
+                    continue
+                # SSO chooser variant (justfab wd1, 2026-07-19): Google/
+                # LinkedIn/email buttons instead of the email+password form.
+                # "Sign in with email" reveals the standard form; the next
+                # loop pass signs in or creates the account as usual.
+                if self._click_automation_id(page, "SignInWithEmailButton"):
+                    page.wait_for_timeout(1500)
+                    continue
+                res = self._maybe_email_verification(page)
                 if res:
                     return res
+                if self._on_wizard(page):
+                    return None
+                link = self._visible(
+                    page, "a[data-automation-id='autofillWithResume'], "
+                          "[data-automation-id='autofillWithResume']")
+                if link:
+                    link.click()
+                    page.wait_for_timeout(2500)
+                    continue
+                btn = self._visible(page, "[data-automation-id='adventureButton']")
+                if btn:
+                    btn.click()
+                    page.wait_for_timeout(2500)
+                    continue
+                page.wait_for_timeout(1500)
+            except Exception as exc:
+                if "context was destroyed" not in str(exc).lower():
+                    raise
                 page.wait_for_timeout(2000)
-                continue
-            res = self._maybe_email_verification(page)
-            if res:
-                return res
-            if self._on_wizard(page):
-                return None
-            link = self._visible(
-                page, "a[data-automation-id='autofillWithResume'], "
-                      "[data-automation-id='autofillWithResume']")
-            if link:
-                link.click()
-                page.wait_for_timeout(2500)
-                continue
-            btn = self._visible(page, "[data-automation-id='adventureButton']")
-            if btn:
-                btn.click()
-                page.wait_for_timeout(2500)
-                continue
-            page.wait_for_timeout(1500)
         return self.escalate_now(page, "Could not reach the Workday application form")
 
     # ---------- filling ----------
@@ -639,15 +761,24 @@ class WorkdayHandler(BaseHandler):
         return pairs
 
     def _poll_options(self, page, timeout_ms: int) -> list[tuple]:
-        """Poll the open menu — lists render async, fixed waits lose races."""
+        """Poll the open menu — lists render async, fixed waits lose races.
+
+        Workday paints a "Select One" placeholder option instantly and loads
+        the real choices async; returning on that first frame caused e.g.
+        Country to be "held" with only ["Select One"]. Keep polling while the
+        only visible options are placeholders, and return the last set seen
+        at timeout so a genuinely placeholder-only menu still returns."""
         waited = 0
+        last: list[tuple] = []
         while waited < timeout_ms:
             page.wait_for_timeout(300)
             waited += 300
             pairs = self._visible_options(page)
             if pairs:
-                return pairs
-        return []
+                last = pairs
+                if any(not _PLACEHOLDER_OPTION.match(t) for _, t in pairs):
+                    return pairs
+        return last
 
     def _click_option(self, page, text: str) -> bool:
         """Click the menu option with exactly `text`. The portal re-renders as
@@ -682,6 +813,8 @@ class WorkdayHandler(BaseHandler):
                 question = self.question_for(page, btn)
                 if not question:
                     continue
+                if _IGNORE_CHOICE_RE.search(question):
+                    continue  # optional field left blank (e.g. Suffix)
                 btn.click()
                 pairs = self._poll_options(page, 3000)
                 if not pairs:
@@ -824,6 +957,52 @@ class WorkdayHandler(BaseHandler):
                 continue
         return held
 
+    def handle_wd_checkbox_groups(self, page) -> list[dict]:
+        """Checkbox GROUPS inside one formField wrapper (justfab Voluntary
+        Disclosures, 2026-07-19: 'Please select all ethnicities that
+        apply.' — 8 checkboxes with NO name attribute, invisible to base's
+        same-name grouping, so the required group stayed empty and the
+        page never advanced). Option text is ``label[for=<input id>]``;
+        the question is the wrapper's own leading label. Resolved like any
+        choice question (ethnicity → the standing Hispanic/Latino answer
+        via the negation-aware matcher); EXACTLY ONE box is ticked via its
+        label click — input.check() times out behind Workday's styled
+        overlays. No identifiable question or no resolution → held/left
+        for the error-banner path, never guessed."""
+        held = []
+        for wrapper in page.query_selector_all("[data-automation-id^='formField-']"):
+            try:
+                boxes = wrapper.query_selector_all("input[type='checkbox']")
+                if len(boxes) < 2:
+                    continue  # singletons are consent/opt-in territory
+                if any(cb.is_checked() for cb in boxes):
+                    continue  # already answered
+                labeled = []
+                for cb in boxes:
+                    cid = cb.get_attribute("id")
+                    lab = page.query_selector(f"label[for='{cid}']") if cid else None
+                    text = " ".join((lab.inner_text() or "").split()) if lab else ""
+                    labeled.append((lab, text))
+                options = [t for _, t in labeled if t]
+                if len(options) < 2:
+                    continue
+                question = self.question_for(page, boxes[0])
+                if not question or question in options:
+                    continue  # no identifiable question — never guess
+                res = self.answer_choice(question, options)
+                if res["hold"] or res["value"] is None:
+                    held.append({"question": question, "options": options,
+                                 "draft_answer": res["value"] or ""})
+                    continue
+                for lab, t in labeled:
+                    if t == res["value"] and lab is not None:
+                        lab.click(timeout=5000)  # fail fast, never a silent 30s
+                        self.pause()
+                        break
+            except Exception:
+                continue
+        return held
+
     def handle_sms_opt_in(self, page) -> None:
         """phone-sms-opt-in is a singleton checkbox the consent regex won't
         touch — answered from standard_answers.sms_opt_in (Yes, per user
@@ -892,7 +1071,20 @@ class WorkdayHandler(BaseHandler):
 
     @staticmethod
     def _seg_matches(seg, desired: str) -> bool:
-        return (seg.input_value() or "").lstrip("0") == desired.lstrip("0")
+        """Workday date spinbuttons keep their value in aria-valuenow, not the
+        input's value attribute (the Month segment renders value="" with
+        aria-valuenow="1"). Reading input_value() alone made every overwrite
+        verification fail, so wrong resume-parsed dates (Lugo 01/2008) were
+        never corrected. Prefer aria-valuenow, fall back to input_value()."""
+        try:
+            cur = seg.evaluate(
+                "el => el.getAttribute('aria-valuenow') || el.value || ''")
+        except Exception:
+            try:
+                cur = seg.input_value() or ""
+            except Exception:
+                cur = ""
+        return str(cur).lstrip("0") == desired.lstrip("0")
 
     def _set_segment(self, panel, field_aid: str, seg_aid: str, desired: str) -> None:
         """Rewrite one MM/YYYY spinbutton segment if it differs.
@@ -910,9 +1102,35 @@ class WorkdayHandler(BaseHandler):
             f"input[data-automation-id='{seg_aid}']")
         if not seg:
             return
+        if not self._write_spinbutton(seg, desired):
+            print(f"  ⚠️  date segment {field_aid}/{seg_aid} resisted "
+                  f"rewrite to {desired} — fix it in the browser")
+
+    def _write_spinbutton(self, seg, desired: str) -> bool:
+        """Verified write into one date spinbutton segment: native-setter +
+        input event first, keyboard second (extracted from _set_segment —
+        _fill_signature_date still used bare click+type, which the calendar
+        popup swallows; that left the required Date empty on justfab's
+        Self Identify page, 2026-07-19)."""
         try:
             if self._seg_matches(seg, desired):
-                return  # already correct ("1" == "01")
+                return True  # already correct ("1" == "01")
+            # Keyboard entry is PRIMARY: these are controlled spinbuttons whose
+            # state tracks aria-valuenow, so the native value-setter (used for
+            # plain inputs) doesn't stick — it changes value then React
+            # re-renders from its own state, reverting to the parsed date.
+            # focus() (not click()) avoids opening the calendar popup that
+            # swallows keystrokes.
+            try:
+                seg.focus()
+                seg.press("ControlOrMeta+a")
+                seg.type(desired, delay=60)
+                self.pause()
+                if self._seg_matches(seg, desired):
+                    return True
+            except Exception:
+                pass
+            # Native-setter fallback for tenants that do read value.
             seg.evaluate(
                 "(el, v) => { const s = Object.getOwnPropertyDescriptor("
                 "window.HTMLInputElement.prototype, 'value').set;"
@@ -921,17 +1139,9 @@ class WorkdayHandler(BaseHandler):
                 " el.dispatchEvent(new Event('change', {bubbles: true})); }",
                 desired)
             self.pause()
-            if self._seg_matches(seg, desired):
-                return
-            seg.click()
-            seg.press("ControlOrMeta+a")
-            seg.type(desired, delay=60)
-            self.pause()
-            if not self._seg_matches(seg, desired):
-                print(f"  ⚠️  date segment {field_aid}/{seg_aid} resisted "
-                      f"rewrite to {desired} — fix it in the browser")
+            return self._seg_matches(seg, desired)
         except Exception:
-            pass
+            return False
 
     def verify_experience_dates(self, page) -> None:
         """Workday's resume parse INVENTS dates (Red Hat 2026-07-18: Lugo
@@ -973,6 +1183,7 @@ class WorkdayHandler(BaseHandler):
                                       "dateSectionMonth-input", ym[1])
                     self._set_segment(panel, "formField-endDate",
                                       "dateSectionYear-input", ym[0])
+                self._trim_role_description_leak(panel)
             except Exception:
                 continue
         edu = (self.profile.get("education") or [{}])[0]
@@ -992,6 +1203,67 @@ class WorkdayHandler(BaseHandler):
             except Exception:
                 continue
 
+    def fill_field_of_study(self, page) -> None:
+        """Fill Education 'Field of Study' from the profile. Unlike open-ended
+        skills multiselects (left alone in handle_multiselects), this is a
+        known exact value, so typing it and selecting the matching option is
+        safe — left blank it renders 'No Response' (Home Depot 2026-07-19)."""
+        value = ((self.profile.get("education") or [{}])[0]).get("field_of_study")
+        if not value:
+            return
+        for cont in page.query_selector_all(
+                "[data-automation-id='formField-fieldOfStudy']"):
+            try:
+                if not cont.is_visible():
+                    continue
+                if cont.query_selector("[data-automation-id*='selectedItem']"):
+                    continue  # already answered (pill rendered)
+                inp = cont.query_selector("input")
+                if not inp:
+                    continue
+                inp.click()
+                inp.fill("")
+                inp.type(value, delay=40)  # keystrokes drive the typeahead
+                pairs = self._poll_options(page, 4000)
+                options = [t for _, t in pairs]
+                idx = self.match_option(value, options)
+                if idx is None:
+                    idx = self.fuzzy_index(value, options)
+                if idx is not None:
+                    self._click_option(page, options[idx])
+                page.keyboard.press("Escape")
+            except Exception:
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                continue
+
+    def _trim_role_description_leak(self, panel) -> None:
+        """Cut a Role Description at the first leaked resume section header
+        (justfab 2026-07-19: the parse appended the whole PROJECTS section
+        to the Lugo entry; user: only that job's own bullets belong there).
+        Runs only on panels already matched to a profile job, so entries
+        from other employers are never touched; a description without a
+        leaked header is left exactly as parsed (the bullets are the
+        tailored resume's own text — never rewritten here)."""
+        ta = panel.query_selector(
+            "[data-automation-id='formField-roleDescription'] textarea")
+        if not ta:
+            return
+        try:
+            text = ta.input_value() or ""
+            m = _RESUME_SECTION_RE.search(text)
+            if not m:
+                return
+            trimmed = text[:m.start()].rstrip()
+            if not trimmed:
+                return  # never blank a description outright
+            ta.fill(trimmed)
+            self.pause()
+        except Exception:
+            pass
+
     def _fill_signature_date(self, page) -> None:
         """Self Identify / Voluntary Disclosures ask for today's date next to
         the signature. Experience/education dates come from resume autofill
@@ -1003,17 +1275,20 @@ class WorkdayHandler(BaseHandler):
         for aid, value in (("dateSectionMonth-input", f"{today.month:02d}"),
                            ("dateSectionDay-input", f"{today.day:02d}"),
                            ("dateSectionYear-input", str(today.year))):
-            el = self._visible(page, f"input[data-automation-id='{aid}']")
-            if not el:
-                continue
-            try:
-                if el.input_value():
+            # query_selector_all, not _visible: the segment inputs sit under
+            # aria-hidden display divs with tabindex=-1 (justfab 2026-07-19)
+            # and can flunk the visibility probe. Only EMPTY segments are
+            # written, so a pre-filled date elsewhere is never touched.
+            for seg in page.query_selector_all(
+                    f"input[data-automation-id='{aid}']"):
+                try:
+                    if seg.input_value():
+                        continue
+                except Exception:
                     continue
-                el.click()
-                el.type(value, delay=60)  # spinbuttons take keystrokes, not fill()
-                self.pause()
-            except Exception:
-                continue
+                if not self._write_spinbutton(seg, value):
+                    print(f"  ⚠️  signature date segment {aid} resisted "
+                          f"rewrite to {value} — fix it in the browser")
 
     def _upload_resume_if_asked(self, page) -> None:
         resume = self.documents["resume"]
@@ -1042,6 +1317,7 @@ class WorkdayHandler(BaseHandler):
         held = []
         self._fill_known_identity(page)
         self.verify_experience_dates(page)   # fix resume-parse artifacts
+        self.fill_field_of_study(page)        # typeahead left blank otherwise
         held += self._fill_text_inputs(page)
         # Travelers' questionnaire renders NATIVE <select>s (2026-07-18) —
         # Red Hat used button-dropdowns only, so this pass was missing and
@@ -1051,6 +1327,7 @@ class WorkdayHandler(BaseHandler):
         held += self.handle_multiselects(page)
         held += self.handle_wd_radios(page)      # label clicks; must run first
         held += self.handle_radio_groups(page)
+        held += self.handle_wd_checkbox_groups(page)  # nameless groups first
         held += self.handle_checkbox_groups(page)
         self.handle_sms_opt_in(page)
         self.handle_disability_checkboxes(page)
@@ -1071,6 +1348,15 @@ class WorkdayHandler(BaseHandler):
             btn = self._visible(page, "[data-automation-id='pageFooterNextButton']")
             if btn:
                 return btn
+            # The 'Something went wrong' interstitial lands DURING this
+            # poll, after the loop-top check has already passed (justfab
+            # 2026-07-19: the run sat out the full timeout and escalated
+            # 'No Save and Continue' — _on_wizard can't recover it either,
+            # the interstitial keeps the progress bar up). Refresh here and
+            # give the reloaded page a fresh window.
+            if self._maybe_refresh_error_page(page):
+                waited = 0
+                continue
             page.wait_for_timeout(500)
             waited += 500
         return None
@@ -1089,6 +1375,13 @@ class WorkdayHandler(BaseHandler):
             # with a validation banner already up (Red Hat run #3 read that
             # as an error on the PREVIOUS step) — the caller refills the new
             # page anyway, so advancing wins.
+            # The interstitial can also swallow the post-click transition —
+            # refresh and keep polling: the re-read header decides whether
+            # the click had already saved (advanced) or not (stuck → the
+            # pause/retry path).
+            if self._maybe_refresh_error_page(page):
+                waited = 0
+                continue
             header = self._page_step(page)
             if header and header != prev_header:
                 return "advanced"
@@ -1116,6 +1409,9 @@ class WorkdayHandler(BaseHandler):
                 count = 0
             if count and count == prev:
                 return
+            if count == 0 and self._maybe_refresh_error_page(page):
+                prev, waited = -1, 0  # interstitial mid-settle — fresh window
+                continue
             prev = count
             page.wait_for_timeout(600)
             waited += 600
@@ -1153,7 +1449,19 @@ class WorkdayHandler(BaseHandler):
         if self.detect_captcha(page):
             return self.escalate_now(page, "CAPTCHA present on load")
         while True:
-            result = self._attempt(page)
+            try:
+                result = self._attempt(page)
+            except Exception as exc:
+                # Crashes join the escalate→pause→retry workflow (user
+                # 2026-07-19, after "Element is not attached to the DOM"
+                # ended a run): stale/disabled elements mid-re-render are
+                # transient — snapshot the page, pause, and let [Enter]
+                # retry from the current page like any other escalation.
+                # main.py's outer guard still catches anything that
+                # escapes (e.g. the page itself died).
+                result = self.escalate_now(
+                    page,
+                    f"handler crashed: {type(exc).__name__}: {str(exc)[:300]}")
             if result.status != "escalated" or not self._offer_resume(result):
                 return result
 
@@ -1168,6 +1476,11 @@ class WorkdayHandler(BaseHandler):
         last_step, same_step = "", 0
         recovered = False
         for _ in range(12):  # wizard pages, with slack for error retries
+            # BEFORE the step read: the interstitial renders the progress
+            # bar with the current step still active, so falling through
+            # would count it against the same-step loop guard.
+            if self._maybe_refresh_error_page(page):
+                continue
             res = self._maybe_email_verification(page)
             if res:
                 return res

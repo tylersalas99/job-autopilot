@@ -293,6 +293,67 @@ def test_standard_value_twitter_and_portfolio():
     assert h.standard_value("GitHub URL") == github
 
 
+def test_match_option_prefers_closest_length_superset():
+    h = _handler()
+    # "United States" is a prefix of both; must pick "...of America", not the
+    # alphabetically-earlier "...Minor Outlying Islands" (Home Depot regression)
+    opts = ["United States Minor Outlying Islands", "United States of America"]
+    assert h.match_option("United States", opts) == 1
+    assert h.match_option("United States", list(reversed(opts))) == 0
+    # exact match still wins outright
+    assert h.match_option("United States of America",
+                          ["United States", "United States of America"]) == 1
+
+
+def test_suffix_choice_is_ignored():
+    from handlers.base import _IGNORE_CHOICE_RE
+    assert _IGNORE_CHOICE_RE.search("Suffix")
+    assert _IGNORE_CHOICE_RE.search("Name Suffix")
+    # must not swallow unrelated fields
+    assert not _IGNORE_CHOICE_RE.search("Prefix")
+    assert not _IGNORE_CHOICE_RE.search("Country")
+    assert not _IGNORE_CHOICE_RE.search("Gender")
+
+
+def test_education_field_of_study_present():
+    assert PROFILE["education"][0]["field_of_study"] == "Computer Information Systems"
+
+
+def test_seg_matches_reads_aria_valuenow():
+    from handlers.workday import WorkdayHandler
+
+    class _FakeSeg:
+        def __init__(self, valuenow="", value=""):
+            self._vn, self._v = valuenow, value
+
+        def evaluate(self, _script):
+            return self._vn or self._v
+
+        def input_value(self):
+            return self._v
+
+    # value attribute empty but aria-valuenow set (the Month-segment case)
+    assert WorkdayHandler._seg_matches(_FakeSeg(valuenow="8"), "08")
+    assert WorkdayHandler._seg_matches(_FakeSeg(valuenow="2019"), "2019")
+    # wrong parsed date must NOT read as a match
+    assert not WorkdayHandler._seg_matches(_FakeSeg(valuenow="2008"), "2019")
+
+
+def test_preferred_contact_method_is_email():
+    h = _handler()
+    for label in ("Preferred contact method", "Preferred Method of Contact",
+                  "Contact Method", "How do you prefer to be contacted?"):
+        assert h.choice_value(label) == "Email", label
+        assert h.standard_value(label) == "Email", label
+
+
+def test_standard_value_compensation_is_negotiable():
+    h = _handler()
+    for label in ("Desired Salary", "Salary Expectations", "Compensation",
+                  "Expected Compensation", "Desired pay", "Pay Expectation"):
+        assert h.standard_value(label) == "Negotiable", label
+
+
 def test_match_option_yes_no_and_eeo():
     h = _handler()
     assert h.match_option("No", ["Yes", "No", "Decline to self identify"]) == 1
@@ -1218,14 +1279,17 @@ class _FakeAuthPage:
     click_filter overlay div that intercepts pointer events — the handler
     must click the overlay, not the button."""
 
-    def __init__(self, overlay=True):
+    def __init__(self, overlay=True, overlay_label="Create Account"):
         self.clicks = []
         self._overlay = overlay
+        self._overlay_label = overlay_label
 
     def query_selector_all(self, sel):
-        if "click_filter" in sel and "Create Account" in sel:
-            return [_FakeClickable("overlay", self.clicks)] if self._overlay else []
-        if "createAccountSubmitButton" in sel:
+        if "click_filter" in sel:
+            if self._overlay and f"aria-label='{self._overlay_label}'" in sel:
+                return [_FakeClickable("overlay", self.clicks)]
+            return []
+        if "SubmitButton" in sel:
             return [_FakeClickable("hidden-button", self.clicks)]
         return []
 
@@ -1246,7 +1310,396 @@ def test_workday_auth_submit_falls_back_to_button_without_overlay():
     assert page.clicks == ["hidden-button"]
 
 
+class _FakeTextEl:
+    def __init__(self, text=""):
+        self._t = text
+
+    def is_visible(self):
+        return True
+
+    def inner_text(self):
+        return self._t
+
+
+class _FakeChooserPage:
+    """justfab wd1 SSO chooser (2026-07-19): the progress bar (active step
+    'Create Account/Sign In') renders BEFORE the chooser buttons, and there
+    is no password input — _on_wizard must not mistake it for the wizard."""
+
+    def __init__(self, step_text):
+        self._step = step_text
+
+    def query_selector_all(self, sel):
+        if "progressBarActiveStep" in sel:
+            return [_FakeTextEl(self._step)]
+        return []
+
+    def query_selector(self, sel):
+        return _FakeTextEl() if "progressBar" in sel else None
+
+
+def test_workday_sso_chooser_page_is_not_the_wizard():
+    h = _workday_handler()
+    page = _FakeChooserPage("current step 1 of 8 Create Account/Sign In")
+    assert h._on_wizard(page) is False
+
+
+def test_workday_real_wizard_step_still_detected():
+    h = _workday_handler()
+    page = _FakeChooserPage("current step 3 of 8 My Information")
+    assert h._on_wizard(page) is True
+
+
+class _FakeNavigatingPage:
+    """Post-auth redirect chain: every DOM query throws."""
+
+    def query_selector_all(self, sel):
+        raise RuntimeError(
+            "Page.query_selector_all: Execution context was destroyed, "
+            "most likely because of a navigation")
+
+
+def test_workday_password_probe_survives_auth_navigation():
+    """justfab crash 2026-07-19: _auth_settled polls the password field
+    while the page navigates — a destroyed context means the field is
+    gone, i.e. auth succeeded, never a crash."""
+    from handlers.workday import WorkdayHandler
+    assert WorkdayHandler._password_input(_FakeNavigatingPage()) is None
+
+
+def test_workday_auth_submit_handles_submit_labeled_overlay():
+    """justfab wd1 (2026-07-19): the sign-in overlay's aria-label is
+    'Submit', not the button text — the handler must still click the
+    overlay, never the intercepted button underneath."""
+    h = _workday_handler()
+    page = _FakeAuthPage(overlay=True, overlay_label="Submit")
+    assert h._click_submit_control(page, "signInSubmitButton", "Sign In") is True
+    assert page.clicks == ["overlay"]
+
+
 # ---------- Workday: standing answers ----------
+def test_workday_crash_joins_pause_retry_workflow(monkeypatch):
+    """user 2026-07-19: a mid-wizard crash ('Element is not attached to
+    the DOM') must escalate into the pause→[Enter]-retries loop, not end
+    the run."""
+    from handlers.base import RunResult
+    h = _workday_handler()
+
+    class _P:
+        def goto(self, *a, **k): pass
+        def wait_for_timeout(self, *a): pass
+
+    crashed = [False]
+
+    def attempt(page):
+        if not crashed[0]:
+            crashed[0] = True
+            raise RuntimeError("Element is not attached to the DOM")
+        return RunResult(status="submitted", reason="ok")
+
+    escalations = []
+    monkeypatch.setattr(h, "_dismiss_cookie_banner", lambda page: None)
+    monkeypatch.setattr(h, "detect_captcha", lambda page: False)
+    monkeypatch.setattr(h, "_attempt", attempt)
+    monkeypatch.setattr(h, "escalate_now",
+                        lambda page, reason, extra=None: (
+                            escalations.append(reason),
+                            RunResult(status="escalated", reason=reason))[1])
+    monkeypatch.setattr(h, "_offer_resume", lambda result: True)  # user hits Enter
+
+    result = h.apply(_P())
+    assert result.status == "submitted"
+    assert escalations and "handler crashed" in escalations[0]
+
+
+_ETHNICITY_OPTIONS = [
+    "American Indian or Alaska Native (Not Hispanic or Latino) (United States of America)",
+    "Asian (Not Hispanic or Latino) (United States of America)",
+    "Black or African American (Not Hispanic or Latino) (United States of America)",
+    "Do Not Wish To Disclose (United States of America)",
+    "Hispanic or Latino (United States of America)",
+    "Native Hawaiian or Other Pacific Islander (Not Hispanic or Latino) (United States of America)",
+    "Two or More Races (Not Hispanic or Latino) (United States of America)",
+    "White (Not Hispanic or Latino) (United States of America)",
+]
+
+
+class _FakeGroupCheckbox:
+    def __init__(self, cid, question):
+        self._id, self._q = cid, question
+
+    def is_checked(self):
+        return False
+
+    def get_attribute(self, attr):
+        return self._id if attr == "id" else None
+
+    def evaluate(self, script):  # _wd_label path
+        return self._q
+
+
+class _FakeOptionLabel:
+    def __init__(self, text, log):
+        self._t, self._log = text, log
+
+    def inner_text(self):
+        return self._t
+
+    def click(self, timeout=None):
+        self._log.append(self._t)
+
+
+class _FakeCheckboxGroupPage:
+    """justfab ethnicityMulti: one formField wrapper, 8 nameless
+    checkboxes, options as label[for=<input id>]."""
+
+    def __init__(self, question, options):
+        self.clicked = []
+        self._boxes = [_FakeGroupCheckbox(f"guid{i}-ethnicityMulti", question)
+                       for i in range(len(options))]
+        self._labels = {f"guid{i}-ethnicityMulti": _FakeOptionLabel(o, self.clicked)
+                        for i, o in enumerate(options)}
+
+    def query_selector_all(self, sel):
+        if sel.startswith("[data-automation-id^='formField-'"):
+            return [self]  # the wrapper doubles as its own query root
+        if "checkbox" in sel:
+            return self._boxes
+        return []
+
+    def query_selector(self, sel):
+        m = re.search(r"label\[for='([^']+)'\]", sel)
+        return self._labels.get(m.group(1)) if m else None
+
+
+def test_workday_ethnicity_checkbox_group_ticks_hispanic():
+    """justfab 2026-07-19: 'Please select all ethnicities that apply.' —
+    nameless checkboxes, so base's same-name grouping never saw the group
+    and the required field blocked the page. Must tick exactly the
+    non-negated Hispanic or Latino option, via label click."""
+    h = _workday_handler()
+    page = _FakeCheckboxGroupPage("Please select all ethnicities that apply.",
+                                  _ETHNICITY_OPTIONS)
+    held = h.handle_wd_checkbox_groups(page)
+    assert held == []
+    assert page.clicked == ["Hispanic or Latino (United States of America)"]
+
+
+class _FakeDateSegment:
+    """Accepts a value only via the native-setter evaluate path — plain
+    typing is swallowed by the calendar popup, like the real widget."""
+
+    def __init__(self):
+        self.value = ""
+
+    def input_value(self):
+        return self.value
+
+    def evaluate(self, script, arg=None):
+        if "HTMLInputElement" in script:
+            self.value = arg
+            return None
+        return self.value  # aria-valuenow read path
+
+    def focus(self):
+        pass
+
+    def click(self):
+        pass
+
+    def press(self, *a):
+        pass
+
+    def type(self, *a, **k):
+        pass
+
+
+class _FakeSelfIdentifyPage:
+    def __init__(self):
+        self.segs = {aid: _FakeDateSegment() for aid in
+                     ("dateSectionMonth-input", "dateSectionDay-input",
+                      "dateSectionYear-input")}
+
+    def query_selector_all(self, sel):
+        if "progressBarActiveStep" in sel:
+            return [_FakeTextEl("current step 5 of 6 Self Identify")]
+        for aid, seg in self.segs.items():
+            if aid in sel:
+                return [seg]
+        return []
+
+
+def test_workday_signature_date_written_via_native_setter():
+    """justfab 2026-07-19: the Self Identify signature Date stayed empty —
+    _fill_signature_date used bare click+type, which the calendar popup
+    swallows. It must go through the verified native-setter path."""
+    from datetime import date as _date
+    h = _workday_handler()
+    page = _FakeSelfIdentifyPage()
+    h._fill_signature_date(page)
+    t = _date.today()
+    assert page.segs["dateSectionMonth-input"].value == f"{t.month:02d}"
+    assert page.segs["dateSectionDay-input"].value == f"{t.day:02d}"
+    assert page.segs["dateSectionYear-input"].value == str(t.year)
+
+
+class _FakeInterstitialPage:
+    """'Something went wrong / Please refresh the page and then try
+    again.' — no formFields render (justfab 2026-07-19)."""
+
+    def __init__(self, has_form_field=False):
+        self.reloads = 0
+        self._ff = has_form_field
+
+    def query_selector(self, sel):
+        if sel.startswith("[data-automation-id^='formField'"):
+            return object() if self._ff else None
+        if sel == "body":
+            return _FakeTextEl("Something went wrong Please refresh the "
+                               "page and then try again.")
+        return None
+
+    def reload(self, **kw):
+        self.reloads += 1
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+def test_workday_error_interstitial_triggers_bounded_refresh():
+    h = _workday_handler()
+    page = _FakeInterstitialPage()
+    for expected in (1, 2, 3):
+        assert h._maybe_refresh_error_page(page) is True
+        assert page.reloads == expected
+    # 4th hit: cap reached — hand off to the escalate→pause→retry path
+    assert h._maybe_refresh_error_page(page) is False
+    assert page.reloads == 3
+
+
+def test_workday_error_text_on_real_form_page_is_not_interstitial():
+    """A validation banner quoting 'something went wrong' on a page WITH
+    formFields must never trigger a reload (unsaved answers)."""
+    h = _workday_handler()
+    page = _FakeInterstitialPage(has_form_field=True)
+    assert h._maybe_refresh_error_page(page) is False
+    assert page.reloads == 0
+
+
+class _FakeRecoveringPage:
+    """Interstitial up until reload; footer button appears after."""
+
+    def __init__(self):
+        self.reloads = 0
+
+    def query_selector(self, sel):
+        if sel == "body":
+            return _FakeTextEl(
+                "" if self.reloads else
+                "Something went wrong Please refresh the page and then try again.")
+        return None  # no formFields
+
+    def query_selector_all(self, sel):
+        if "pageFooterNextButton" in sel and self.reloads:
+            return [_FakeClickable("footer", [])]
+        return []
+
+    def reload(self, **kw):
+        self.reloads += 1
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+def test_workday_next_button_poll_refreshes_interstitial():
+    """justfab 2026-07-19 (second occurrence): the interstitial rendered
+    DURING the footer poll, after the loop-top check had passed — the run
+    sat out the timeout and escalated. The poll itself must refresh."""
+    h = _workday_handler()
+    page = _FakeRecoveringPage()
+    btn = h._next_button(page, timeout_ms=3000)
+    assert btn is not None
+    assert page.reloads == 1
+
+
+class _FakeRoleDescription:
+    def __init__(self, text):
+        self.value = text
+
+    def input_value(self):
+        return self.value
+
+    def fill(self, v):
+        self.value = v
+
+
+class _FakeExperiencePanel:
+    def __init__(self, text):
+        self.ta = _FakeRoleDescription(text)
+
+    def query_selector(self, sel):
+        return self.ta if "roleDescription" in sel else None
+
+
+_LUGO_BULLETS = (
+    "Designed and built internal applications with React, Python, PyQt, and "
+    "SQL to organize company data.\n"
+    "Led the company's transition to telehealth during COVID lockdowns."
+)
+
+
+def test_workday_role_description_leak_trimmed_at_section_header():
+    """justfab 2026-07-19: Workday's parse appended the resume's entire
+    PROJECTS section to the Lugo entry. Cut at the leaked header; keep the
+    job's own bullets untouched."""
+    h = _workday_handler()
+    panel = _FakeExperiencePanel(
+        _LUGO_BULLETS + "\nPROJECTS\nSelf-Hosted Security Camera System "
+        "Python, FastAPI, Docker, MQTT\nReplaced a cloud-dependent Ring "
+        "doorbell with a self-hosted stack.")
+    h._trim_role_description_leak(panel)
+    assert panel.ta.value == _LUGO_BULLETS
+
+
+def test_workday_role_description_without_leak_untouched():
+    h = _workday_handler()
+    # 'projects' mid-sentence is not a section header — never trimmed
+    text = _LUGO_BULLETS + "\nDelivered projects on time across the company."
+    panel = _FakeExperiencePanel(text)
+    h._trim_role_description_leak(panel)
+    assert panel.ta.value == text
+
+
+def test_consent_regex_matches_read_and_consent_terms_and_conditions():
+    """justfab 2026-07-19: 'Yes, I have read and consent to the terms and
+    conditions.' missed both the 'i consent' adjacency and
+    'terms of service' — the required box stayed unticked."""
+    from handlers.base import BaseHandler
+    assert BaseHandler._CONSENT_RE.search(
+        "Yes, I have read and consent to the terms and conditions.")
+    # marketing opt-ins must stay untouched
+    assert not BaseHandler._CONSENT_RE.search(
+        "Send me occasional emails about new job openings")
+
+
+def test_workday_worked_for_at_any_time_phrasing_answers_no():
+    """justfab 2026-07-19: 'Have you at any time worked for TechStyle...'
+    missed the ever/previously row and Claude answered Yes. User: ANY
+    worked-for-a-company question answers No (work-history guard aside)."""
+    h = _workday_handler()
+    q = ("Have you at any time worked for TechStyle Fashion Group, "
+         "TechStyle OS, JustFab Inc., or any of the following brands: "
+         "JustFab, ShoeDazzle, Yitty, FabKids, Fabletics, or Savage X Fenty?")
+    assert h.choice_value(q) == "No"
+
+
+def test_workday_sponsorship_question_answers_no():
+    h = _workday_handler()
+    q = ("Will you, now or in the future, require sponsorship for US work "
+         "authorization (i.e., H-1B, TN, O-3, E-3, F-1, STEM OPT).")
+    assert h.choice_value(q) == "No"
+
+
 def test_workday_choice_state_device_and_phone_code():
     h = _workday_handler()
     assert h.choice_value("State") == "Texas"          # full name, never "TX"
@@ -1501,9 +1954,14 @@ class _FakeDateSeg:
         return self.value
 
     def evaluate(self, js, arg=None):
+        if "aria-valuenow" in js:
+            return self.value  # _seg_matches read path
         assert "HTMLInputElement" in js  # native setter, not naive el.value
         if self._react_ok:
             self.value = arg
+
+    def focus(self):
+        pass
 
     def click(self, **kw):
         pass
@@ -1823,6 +2281,13 @@ def test_workday_api_url_built_from_posting_url():
     assert workday_api_url(
         "https://acme.wd1.myworkdayjobs.com/ext/job/Remote/Analyst_R99") == \
         "https://acme.wd1.myworkdayjobs.com/wday/cxs/acme/ext/job/Remote/Analyst_R99"
+    # a trailing /apply must be stripped — the apply flow shares the job path
+    # but the CXS job endpoint empties when it's kept (Home Depot regression)
+    assert workday_api_url(
+        "https://acme.wd5.myworkdayjobs.com/careers/job/Remote/"
+        "Senior-Engineer_Req1/apply") == \
+        ("https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/careers/job/"
+         "Remote/Senior-Engineer_Req1")
     assert workday_api_url("https://boards.greenhouse.io/acme/jobs/1") is None
     assert company_from_workday_url(
         "https://acme.wd5.myworkdayjobs.com/en-US/careers/job/x") == "Acme"
@@ -1881,3 +2346,244 @@ def test_workday_intake_survives_cxs_failure(monkeypatch):
     assert p.ats == "workday" and p.title == "Analyst"
     assert p.company == "Acme"  # tenant-slug fallback
     assert any("CXS" in w for w in p.warnings)
+
+
+# ---------- SmartRecruiters: intake enrichment + handler logic ----------
+_SR_URL = "https://jobs.smartrecruiters.com/Visa/744000133907678-sr-manager"
+_SR_UUID = "267d47c7-29af-4c8f-a19d-c112895329df"
+
+
+def test_smartrecruiters_url_builders():
+    from intake.fetcher import (smartrecruiters_api_url,
+                                smartrecruiters_apply_url, smartrecruiters_ids)
+    assert smartrecruiters_ids(_SR_URL) == ("Visa", "744000133907678")
+    assert smartrecruiters_ids(_SR_URL + "?trid=abc") == ("Visa", "744000133907678")
+    assert smartrecruiters_api_url(_SR_URL) == \
+        "https://api.smartrecruiters.com/v1/companies/Visa/postings/744000133907678"
+    # careers-site URLs carry no posting id; foreign domains never match
+    assert smartrecruiters_ids("https://careers.smartrecruiters.com/Visa") is None
+    assert smartrecruiters_ids("https://boards.greenhouse.io/acme/jobs/1") is None
+    # the posting API's uuid IS the publication uuid the form URL needs
+    assert smartrecruiters_apply_url("Visa", _SR_UUID) == \
+        (f"https://jobs.smartrecruiters.com/oneclick-ui/company/Visa/"
+         f"publication/{_SR_UUID}?dcr_ci=Visa")
+
+
+def _sr_api_payload(active=True):
+    return {
+        "name": "Sr. Manager", "uuid": _SR_UUID, "active": active,
+        "company": {"name": "Visa", "identifier": "Visa"},
+        "location": {"fullLocation": "Austin, TX, United States"},
+        "jobAd": {"sections": {
+            "jobDescription": {"title": "Job Description",
+                               "text": "<p>Lead <b>Python</b> initiatives.</p>"},
+            "qualifications": {"title": "Qualifications",
+                               "text": "<p>5+ years experience.</p>"}}},
+    }
+
+
+def test_smartrecruiters_intake_enriches_and_rewrites_to_oneclick(monkeypatch):
+    import intake.fetcher as f
+
+    def fake_get(url, **kw):
+        if "api.smartrecruiters.com" in url:
+            return _FakeJsonResp(url, payload=_sr_api_payload())
+        return _FakeJsonResp(url, text="<html><h1>Sr. Manager</h1></html>")
+
+    monkeypatch.setattr(f.requests, "get", fake_get)
+    p = f.fetch_posting(_SR_URL)
+    assert p.ats == "smartrecruiters"
+    assert p.title == "Sr. Manager"
+    assert p.company == "Visa"
+    assert p.location == "Austin, TX, United States"
+    assert "Lead Python initiatives." in p.description
+    assert "5+ years experience." in p.description
+    assert p.closed is False
+    # final_url must point straight at the oneclick-ui apply form
+    assert p.final_url == (f"https://jobs.smartrecruiters.com/oneclick-ui/"
+                           f"company/Visa/publication/{_SR_UUID}?dcr_ci=Visa")
+
+
+def test_smartrecruiters_inactive_posting_marked_closed(monkeypatch):
+    import intake.fetcher as f
+
+    def fake_get(url, **kw):
+        if "api.smartrecruiters.com" in url:
+            return _FakeJsonResp(url, payload=_sr_api_payload(active=False))
+        return _FakeJsonResp(url, text="<html><h1>Sr. Manager</h1></html>")
+
+    monkeypatch.setattr(f.requests, "get", fake_get)
+    p = f.fetch_posting(_SR_URL)
+    assert p.closed is True
+    assert any("inactive" in w.lower() for w in p.warnings)
+
+
+def test_smartrecruiters_intake_survives_api_failure(monkeypatch):
+    """API errors degrade to the job-page URL — the handler then clicks
+    "I'm interested" itself. Never crash, never rewrite final_url."""
+    import intake.fetcher as f
+
+    def fake_get(url, **kw):
+        if "api.smartrecruiters.com" in url:
+            raise RuntimeError("boom")
+        return _FakeJsonResp(url, text="<html><h1>Sr. Manager</h1></html>")
+
+    monkeypatch.setattr(f.requests, "get", fake_get)
+    p = f.fetch_posting(_SR_URL)
+    assert p.ats == "smartrecruiters"
+    assert p.final_url == _SR_URL
+    assert p.company == "Visa"  # URL-slug fallback
+    assert any("I'm interested" in w for w in p.warnings)
+
+
+def test_smartrecruiters_registered():
+    from handlers.registry import get_handler
+    assert get_handler("smartrecruiters").ats_name == "smartrecruiters"
+
+
+def test_smartrecruiters_submit_never_matches_partner_apply_buttons():
+    """The form carries "Apply With Indeed"/"Apply with SEEK"/"Apply with
+    LinkedIn" one-click partner buttons — a substring match on "Apply"
+    would click a third-party OAuth flow instead of submitting."""
+    from handlers.smartrecruiters import SmartRecruitersHandler as H
+    assert H._submitish("Submit")
+    assert H._submitish("Submit Application")
+    assert H._submitish("Apply")
+    assert H._submitish("  Apply now ")
+    assert not H._submitish("Apply With Indeed")
+    assert not H._submitish("Apply with SEEK")
+    assert not H._submitish("Apply with LinkedIn")
+    assert not H._submitish("Next")
+    assert not H._submitish("Cookie Settings")
+    assert not H._submitish("")
+
+
+class _FakeSplCheckboxInput:
+    def __init__(self):
+        self.checked = False
+
+    def is_checked(self):
+        return self.checked
+
+    def check(self, timeout=None):
+        self.checked = True
+
+
+class _FakeSplCheckbox:
+    """spl-checkbox host: agreement sentence is slotted light-DOM text on
+    the host (textContent), invisible to a parentElement climb from inside
+    the shadow root."""
+
+    def __init__(self, text):
+        self._text = text
+        self.inner = _FakeSplCheckboxInput()
+        self.host_clicked = False
+
+    def query_selector(self, sel):
+        return self.inner if "checkbox" in sel else None
+
+    def evaluate(self, js):
+        assert "textContent" in js
+        return self._text
+
+    def click(self):
+        self.host_clicked = True
+
+
+class _FakeSplPage:
+    def __init__(self, hosts):
+        self._hosts = hosts
+
+    def query_selector_all(self, sel):
+        return self._hosts if "spl-checkbox" in sel else []
+
+
+def _sr_handler():
+    from handlers.smartrecruiters import SmartRecruitersHandler
+    cfg = {"automation": {"human_delay_ms": [0, 0]}, "paths": {"pending_dir": "pending"}}
+    return SmartRecruitersHandler(cfg, PROFILE, _posting(ats="smartrecruiters"),
+                                  {"jd_text": ""}, None)
+
+
+def test_smartrecruiters_spl_consent_ticked_marketing_left_alone():
+    h = _sr_handler()
+    consent = _FakeSplCheckbox(
+        "I have read and accept the Privacy Policy of Visa.")
+    marketing = _FakeSplCheckbox(
+        "Send me occasional job alerts and newsletters from this company.")
+    h.handle_spl_consents(_FakeSplPage([consent, marketing]))
+    assert consent.inner.checked is True
+    assert marketing.inner.checked is False
+    assert marketing.host_clicked is False
+
+
+class _FakeContentPage:
+    def __init__(self, content):
+        self._content = content
+
+    def content(self):
+        return self._content
+
+
+def test_smartrecruiters_confirmation_never_false_positives_on_form_page():
+    """_submit checks _confirmed BEFORE clicking (supervised-gate manual-
+    submit path). The form page always contains "Apply With Indeed", so a
+    loose ("thank you" AND "apply") marker would record a submission that
+    never happened whenever stray thank-you text exists in privacy/cookie
+    boilerplate."""
+    from handlers.smartrecruiters import SmartRecruitersHandler as H
+    form_page = _FakeContentPage(
+        "<html>Easy Apply — Apply With Indeed. Personal information. "
+        "Cookie notice: thank you for visiting our site.</html>")
+    assert H._confirmed(form_page) is False
+    assert H._confirmed(_FakeContentPage("Thank you for applying!")) is True
+    assert H._confirmed(_FakeContentPage(
+        "Your application has been submitted.")) is True
+    assert H._confirmed(_FakeContentPage("Application submitted")) is True
+
+
+class _FakeSrTextInput:
+    def __init__(self, el_id, visible=True):
+        self._id, self._visible = el_id, visible
+        self.value = ""
+        self.filled = []
+
+    def is_visible(self):
+        return self._visible
+
+    def input_value(self):
+        return self.value
+
+    def get_attribute(self, name):
+        return {"id": self._id}.get(name)
+
+    def fill(self, v):
+        self.filled.append(v)
+        self.value = v
+
+
+class _FakeSrTextPage:
+    """spl-autocomplete inner inputs surface in BOTH queries — the generic
+    text pass must recognize and skip them by membership."""
+
+    def __init__(self, typeaheads, texts):
+        self._typeaheads, self._texts = typeaheads, texts
+
+    def query_selector_all(self, sel):
+        if "spl-autocomplete" in sel:
+            return self._typeaheads
+        if "input[type='text']" in sel:
+            return self._typeaheads + self._texts
+        return []
+
+
+def test_smartrecruiters_generic_pass_never_plainfills_autocomplete():
+    """After a failed city typeahead the input is EMPTY and its label
+    ("City") matches the identity map — a plain fill() would stuff raw text
+    into a structured picker with no suggestion selected."""
+    h = _sr_handler()
+    city = _FakeSrTextInput("spl-form-element_10")
+    page = _FakeSrTextPage([city], [])
+    held = h._generic_text_pass(page)
+    assert held == []
+    assert city.filled == []  # untouched — typeahead territory only

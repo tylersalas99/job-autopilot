@@ -107,6 +107,20 @@ def run(url: str, dry_run: bool, answers_file: str | None = None) -> int:
         return 1
 
     # 3. Tailoring
+    # A blank/thin JD means everything downstream (track, resume tailoring,
+    # cover letter) is ungrounded — the drafter even returns a refusal string.
+    # Halt here instead of generating and uploading garbage documents.
+    if len((posting.description or "").strip()) < 200:
+        case = escalate(ROOT / cfg["paths"]["pending_dir"],
+                        reason="Job description missing/thin — cannot tailor documents",
+                        url=posting.final_url, company=posting.company, title=posting.title,
+                        extra={"warnings": posting.warnings})
+        tracker.record(company=posting.company, title=posting.title, url=url,
+                       final_url=posting.final_url, ats=posting.ats,
+                       status="escalated", reason="Job description missing/thin")
+        print(f"✗ Job description missing/thin → {case}")
+        return 1
+
     app_dir = ROOT / cfg["paths"]["output_dir"] / f"{slug(posting.company)}_{slug(posting.title)}"
     app_dir.mkdir(parents=True, exist_ok=True)
     (app_dir / "jd.txt").write_text(
@@ -143,6 +157,23 @@ def run(url: str, dry_run: bool, answers_file: str | None = None) -> int:
     letter = tailor.draft_cover_letter(cfg, profile, track, posting.description,
                                        posting.title, posting.company)
     (app_dir / "cover_letter.txt").write_text(letter, encoding="utf-8")
+    # Guard against a model refusal/clarification getting rendered into the PDF
+    # a recruiter would see (e.g. "I'll need the actual job description...").
+    _bad_letter = (
+        len(letter.strip()) < 200
+        or re.search(r"\b(I'll need|I need|could you (paste|provide|share)|"
+                     r"please (paste|provide|share)|as an ai|I('m| am) unable"
+                     r"|actual job description)\b", letter, re.IGNORECASE))
+    if _bad_letter:
+        case = escalate(ROOT / cfg["paths"]["pending_dir"],
+                        reason="Cover letter draft looks invalid (possible refusal) — review",
+                        url=posting.final_url, company=posting.company, title=posting.title,
+                        extra={"cover_letter_draft": letter})
+        tracker.record(company=posting.company, title=posting.title, url=url,
+                       final_url=posting.final_url, ats=posting.ats, track=track,
+                       status="escalated", reason="Invalid cover letter draft")
+        print(f"✗ Cover letter draft invalid → {case}")
+        return 1
     letter_name = f"{profile['identity']['full_name'].replace(' ', '')}-CoverLetter.pdf"
     letter_path = render_pdf(cover_letter_html(profile, letter), app_dir / letter_name)
     (app_dir / "tailored.json").write_text(json.dumps(tailored, indent=2), encoding="utf-8")

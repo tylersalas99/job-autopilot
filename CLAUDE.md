@@ -208,16 +208,91 @@ of failure already handled.
 
 ## Known gaps (next work, in order)
 
-1. First CLEAN unattended Workday submission — both shakeout applications
-   (Red Hat, Travelers, 2026-07-18) reached the end of the wizard but
-   needed manual nudges for bugs that are all since fixed. The Self
-   Identify page (signature date + disability trio) and the repaired
-   hear-about/date/veteran paths have NOT been re-verified live. Supervise
-   the next Workday run end-to-end.
-2. Batch pacing — add a delay between batch submissions before real use.
-3. Ashby Date fields ("Pick date..." calendar inputs) — skipped by the fill
+1. First CLEAN unattended Workday submission — Home Depot (wd5) was
+   SUBMITTED under supervision 2026-07-19 after the shakeout fixes below, so
+   the wizard now completes end-to-end. Red Hat and Travelers (2026-07-18)
+   reached the end but needed manual nudges for bugs since fixed. The Self
+   Identify page (signature date + disability trio) has still only been
+   exercised on justfab; keep supervising until an UNATTENDED run lands.
+2. First supervised SmartRecruiters run — the handler (added 2026-07-19)
+   is built from a live DOM capture of step 1 only; the step-2 screening
+   question widgets and the final submit button text/confirmation marker
+   are unverified. Supervise end-to-end and pin what's found.
+   **Start from SMARTRECRUITERS_PLAN.md** — it maps verified facts vs.
+   assumptions, the 8 most likely breakages with fix directions, the
+   shakeout runbook, and the invariants that must not regress.
+3. Batch pacing — add a delay between batch submissions before real use.
+4. Ashby Date fields ("Pick date..." calendar inputs) — skipped by the fill
    loop (fill() text is ignored by React), escalate via the required check.
-4. Optional: IMAP confirmation-email verification.
+5. Optional: IMAP confirmation-email verification.
+
+(Done 2026-07-19: Home Depot Workday shakeout — first SUBMITTED Workday
+application, supervised, after fixing a chain of bugs surfaced live:
+- Intake fed the `/apply` URL; `workday_api_url` kept the `/apply` segment so
+  the CXS lookup returned nothing → blank JD → the tailorer emitted a REFUSAL
+  ("I'll need the actual job description...") that rendered straight into the
+  cover-letter PDF. Fixes: strip a trailing `/apply` in `workday_api_url`;
+  main.py now halts+escalates when the JD is <200 chars AND runs a
+  cover-letter sanity check (refusal/too-short) before rendering the PDF.
+- Country resolved to "United States Minor Outlying Islands": profile stores
+  "United States" (a prefix of several options) and `match_option` returned
+  the FIRST substring hit, which sorts before "...of America". This cascaded
+  into a held "Region" question listing those islands' atolls. Fix:
+  `match_option` now picks the closest-length superset among substring
+  matches (exact match still wins first). This is the general fix for any
+  prefix-collision dropdown, not just Country.
+- `_poll_options` returned on the first frame, grabbing only Workday's
+  instant "Select One" placeholder before real options loaded → bogus held
+  "Country". Fix: keep polling while the only options are placeholders,
+  return the last set at timeout.
+- Experience dates stayed at the resume-parse artifacts (Lugo 01/2008-01/2019
+  vs profile 08/2019-09/2022) even though `verify_experience_dates` ran: the
+  segments store their value in `aria-valuenow`, not the input `value`
+  (Month renders value="" aria-valuenow="1"), so `_seg_matches` read blank
+  and every overwrite "passed" then reverted. Fix: `_seg_matches` reads
+  aria-valuenow; `_write_spinbutton` drives the segment by keyboard first
+  (focus(), not click(), to dodge the calendar popup) since the native
+  value-setter doesn't stick on these controlled widgets.
+- Field of Study rendered "No Response": it's a typeahead multiselect that
+  handle_multiselects deliberately skips. Since it's a known exact value now,
+  `fill_field_of_study` types education[0].field_of_study
+  ("Computer Information Systems", added to profile) and selects the match.
+- Suffix dropdown stalled the run. `_IGNORE_CHOICE_RE` (base.py) now skips
+  Suffix entirely in both handle_dropdowns and handle_native_selects — never
+  answered, never held (Tyler has no suffix).
+- Standing answers added: preferred contact method → "Email"; any
+  compensation/salary free-text field → "Negotiable" (wires up the
+  previously-unread salary_expectation.text_answer). Both in choice_value and
+  standard_value.)
+
+(Done 2026-07-19: SmartRecruiters handler — handlers/smartrecruiters.py,
+DOM contract in its docstring, captured live from Visa's oneclick-ui form
+(read-only: step 1 + config API + posting API; the wizard was never
+advanced or submitted). Intake enriches from the public posting API and
+rewrites final_url to the deterministic oneclick-ui apply URL; inactive
+postings are marked closed. Mock-DOM tests cover URL builders, enrichment,
+API-failure fallback, partner-button exclusion, and spl-checkbox consent.
+Not yet run live.)
+
+(Done 2026-07-19: Workday SSO-chooser auth variant — justfab/Fabletics wd1
+shows Google/LinkedIn/"Sign in with email" buttons instead of the
+email+password form; `_reach_application` now clicks `SignInWithEmailButton`
+to reveal the standard form. Same capture: that tenant's SIGN-IN
+`click_filter` overlay is aria-labeled "Submit" (not the button text) —
+`_click_submit_control` falls back to the "Submit" label before the raw
+button — and the revealed forms carry a 1px `beecatcher` honeypot input
+that must never be filled (auth fills exact automation-ids only).
+Shakeout on this tenant found two more bugs, both fixed: (1) `_on_wizard`
+mistook the chooser page for the wizard — the progress bar renders before
+the chooser buttons and there's no password field, so the button probe
+raced; the deterministic tell is the bar's own active-step text
+("Create Account/Sign In" → auth). (2) `_auth_settled`'s password poll
+crashed with "Execution context was destroyed" when the post-creation
+redirect raced a DOM query — `_password_input` treats a destroyed context
+as "field gone" (the success signal), and `_reach_application` retries a
+pass on that error class. The justfab account WAS created (16:33 run,
+stored in workday_accounts.json) — next run signs in with it. DOM
+contract in handlers/workday.py docstring; not yet clean end-to-end.)
 
 (Done 2026-07-18: Workday handler — handlers/workday.py, full DOM contract
 in its docstring, shaken out live against Red Hat (wd5) and Travelers (wd5)
@@ -247,16 +322,53 @@ form answers, ethnicity/communities/age standing answers.)
 
 ## Supported ATS
 
-Greenhouse, Lever, Ashby, and Workday have handlers (see
+Greenhouse, Lever, Ashby, Workday, and SmartRecruiters have handlers (see
 `handlers/registry.py`). Greenhouse/Lever/Ashby are live-proven, including
 Ashby's combobox/Boolean widgets (added and live-verified 2026-07-14).
 Workday (added + shaken out on Red Hat and Travelers 2026-07-18) walks the
 full wizard but hasn't yet produced a clean unattended submission —
-supervise it. Lever/Ashby intake derives the company from the URL slug and
+supervise it. SmartRecruiters (added 2026-07-19, DOM captured live from
+Visa's form, NO live run yet) must be supervised end-to-end on its first
+runs. Lever/Ashby intake derives the company from the URL slug and
 strips it from titles; Workday intake pulls title/company/description from
 the tenant's CXS JSON endpoint (job pages are JS-rendered) and falls back
-to the tenant slug for the company.
+to the tenant slug for the company. SmartRecruiters intake enriches from
+the public posting API (`api.smartrecruiters.com/v1/companies/<company>/
+postings/<id>` — no auth) and rewrites final_url straight to the
+oneclick-ui apply form (the API's `uuid` IS the publication UUID), so the
+handler never hunts for the "I'm interested" button; the same endpoint
+verifies liveness (`active` field) before offering a posting.
 LinkedIn URLs are refused by policy — never bypass this.
+
+## SmartRecruiters specifics
+
+Full DOM contract in handlers/smartrecruiters.py's docstring (captured
+live 2026-07-19 against Visa's oneclick-ui "Easy Apply"). Headlines:
+
+- **Everything is spl-\* web components (open shadow DOM).** Playwright
+  CSS selectors pierce shadow roots, so plain query_selector works — but
+  `closest()`/`getElementsByName` inside evaluate() STOP at shadow
+  boundaries. That's why spl-checkbox consents get their own handler
+  (`handle_spl_consents` reads the host's slotted textContent) instead of
+  relying on the base consent climb.
+- **Step 1 has stable input ids** (first-name-input, email-input,
+  confirm-email-input, linkedin-input, file-input...). TWO file inputs
+  exist: the avatar uploader comes FIRST in the DOM — always scope the
+  resume upload to `spl-dropzone input[type=file]` / `#file-input`, never
+  a bare `input[type=file]` query.
+- **Never match submit by "Apply" substring** — "Apply With Indeed" /
+  "Apply with SEEK" partner buttons would match; `_submitish` requires an
+  exact submit/apply phrase and excludes partner names.
+- **DataDome bot protection** loads on the form (its challenge is a
+  captcha-delivery.com iframe — added to this handler's detect_captcha).
+  Human pacing matters; captchas remain the user's to solve.
+- **Multi-step wizard** ("Next" is an spl-button): step-2 screening
+  question widgets were NOT reachable read-only during capture — the
+  generic base passes + the ng-invalid required check (Angular marks the
+  spl-* HOST element ng-invalid; labels end with `*`) cover them. Expect
+  held/escalated questions there until a supervised run pins the DOM.
+- Twitter/Facebook step-1 fields are URL inputs and stay BLANK — the
+  "None" standing answer is for question fields, not URL validation.
 
 ## Workday specifics
 
@@ -274,13 +386,26 @@ driven (Workday's CSS classes are obfuscated/unstable).
   password, add it under the host key, re-run.
 - **Escalations pause instead of ending** (terminal runs): the case is
   written, then [Enter] re-enters the wizard from the current page after
-  you fix things in the open browser; [s] stops. Phone/no-TTY runs
+  you fix things in the open browser; [s] stops. Handler CRASHES inside
+  the attempt loop join the same pause→retry path (user 2026-07-19, after
+  a stale-element click ended a run) — main.py's outer guard still
+  backstops anything that escapes. Phone/no-TTY runs
   escalate and stop. Held questions print at the pause, never
   auto-answered. Loop guard: ONE repeat pass per page, then escalate.
 - **Auth:** submit buttons hide under a `click_filter` overlay that
   intercepts pointer events — always click the overlay. The auth page
   ALSO renders the progress bar (its step 1), so a visible password field
   means auth, never wizard. Never fill the `beecatcher` honeypot input.
+- **"Something went wrong / Please refresh the page" interstitial**
+  (justfab 2026-07-19, on My Information right after sign-in): auto-
+  reloaded, max 3 per run, then the normal escalate→pause→retry path.
+  Detection requires the phrase AND zero formFields — banner text on a
+  real form page must never trigger a reload (unsaved answers). The check
+  runs INSIDE the long polls (`_next_button`, `_advance_state`,
+  `_wait_form_settle`), not just at loop tops — the interstitial's
+  favorite moment is mid-poll, after the loop-top check already passed
+  (second occurrence, same day; `_on_wizard` can't recover it because
+  the interstitial keeps the progress bar up).
 - **Async rendering is the #1 bug class:** footer renders before form
   fields — wait for the formField count to stabilize before filling;
   wizard steps are read from `progressBarActiveStep` (h1/h2 is the job
@@ -293,23 +418,67 @@ driven (Workday's CSS classes are obfuscated/unstable).
   answer). Option clicks re-query by text with 5s timeouts and fall into
   held on failure. Radios: click `label[for=…]`, never `input.check()`.
   Questionnaires may be button-dropdowns (Red Hat) OR native <select>s
-  (Travelers) — both passes run. Date spinbuttons: write via the native
-  value setter + input event (typing gets swallowed by the calendar
-  popup), verified, keyboard fallback.
+  (Travelers) — both passes run. Checkbox GROUPS in one formField wrapper
+  have NAMELESS inputs (justfab's required "select all ethnicities" —
+  invisible to base same-name grouping): `handle_wd_checkbox_groups`
+  resolves them profile-first (ethnicity → Hispanic/Latino, negation-
+  aware) and ticks exactly ONE box via its label[for] click. The
+  "read and consent to the terms and conditions" singleton needed the
+  base consent regex broadened + a label-click fallback when check()
+  times out on styled widgets (both justfab 2026-07-19). Date spinbuttons: the value lives in
+  `aria-valuenow`, NOT the input's `value` attribute (Month renders
+  value="" aria-valuenow="1") — `_seg_matches` reads aria-valuenow, so
+  overwrite verification no longer silently passes on a blank read (Home
+  Depot 2026-07-19: that bug left Lugo's wrong parsed dates in place).
+  `_write_spinbutton` drives the segment by KEYBOARD first — focus() (not
+  click(), which opens the calendar popup) then select-all + type — because
+  the native value-setter doesn't stick on these controlled widgets; the
+  native setter is the fallback. Shared by experience dates AND the Self
+  Identify signature date (`_fill_signature_date` writes only EMPTY
+  segments, so pre-filled dates are never touched).
 - **Resume-parse lies:** Workday's Autofill invents work/education dates
   (Lugo became 01/2008–01/2019). `verify_experience_dates` rewrites them
   from profile ground truth, matching panels by company; non-profile
-  employers and the current job's end date are never touched.
+  employers and the current job's end date are never touched. The parse
+  also LEAKS resume sections into Role Description (justfab 2026-07-19:
+  the whole PROJECTS section landed in the Lugo entry; user: only the
+  job's own bullets belong there) — `_trim_role_description_leak` cuts
+  matched panels' descriptions at the first line that is exactly a
+  resume section header (PROJECTS/EDUCATION/TECHNICAL SKILLS/…), keeping
+  the tailored bullets above it verbatim.
+- **Field of Study** is a typeahead multiselect that handle_multiselects
+  skips (open-ended). `fill_field_of_study` fills it from
+  education[0].field_of_study ("Computer Information Systems") — a known
+  exact value, so typing + selecting the match is safe; left blank it shows
+  "No Response" (Home Depot 2026-07-19).
+- **Country / prefix-collision dropdowns:** profile stores "United States"
+  (a prefix of "United States of America" AND "...Minor Outlying Islands").
+  `match_option` picks the closest-LENGTH superset among substring matches
+  (exact match wins first), so it no longer grabs the alphabetically-first
+  wrong option — which had cascaded into a held "Region" full of island
+  atolls (Home Depot 2026-07-19).
+- **Suffix is ignored entirely** (`_IGNORE_CHOICE_RE`, base.py) in both
+  handle_dropdowns and handle_native_selects — optional field, Tyler has
+  none; answering or holding it just stalled the run (2026-07-19). Prefix
+  is NOT in the skip set (left as-is).
 - **Standing answers proven on Workday:** ever-worked-for/currently-
   employed-by <company> → No (unless the company is in work_history —
-  then held); hold/require work authorization → No, plain authorized-to-
+  then held) — the row also matches "at any time worked for"/"in the
+  past" phrasings (justfab 2026-07-19, where the miss let Claude answer
+  Yes; user: ANY worked-for-a-company question answers No); require-
+  sponsorship → No (base `sponsor` row — on justfab it never matched
+  because questionnaire formFields have no <label>: `_wd_label` now falls
+  back to the `richText`/`rich-label` div for the question text); hold/require work authorization → No, plain authorized-to-
   work → Yes; veteran → always "not a veteran" (`veteran_option_index`
   runs BEFORE containment — "a veteran, but I am not a protected veteran"
   CONTAINS the standing answer); ethnicity ignores negated "(Not Hispanic
   or Latino)" mentions; hear-about matches "<Company> Jobs Site";
   "certify …true and accurate" dropdowns → Yes; involuntarily
   discharged/asked to resign → No; `phone-sms-opt-in` from sms_opt_in;
-  state dropdowns want the full name (`identity.state_full`).
+  state dropdowns want the full name (`identity.state_full`); preferred
+  contact method → "Email"; any compensation/salary free-text field →
+  "Negotiable" (wires up salary_expectation.text_answer, previously
+  defined in profile but never read) — both added 2026-07-19.
 
 ## When the automation breaks
 

@@ -86,13 +86,16 @@ first contact with a company's form.
    Eng) picks correctly.
 2. **Supervised live runs** (`supervised_mode: true` in config.yaml, the
    default): the browser opens visibly, fills everything, then **pauses before
-   the submit click** so you can review. Do 5–10 of these. ✅ Six submissions
+   the submit click** so you can review. Do 5–10 of these. ✅ Seven submissions
    so far: Airtable + Smartsheet (Greenhouse), Supermove + Aledade (Lever),
-   Close + Flipturn (Ashby). The Smartsheet run (2026-07-14) exercised the
-   new job-boards UI end to end — education, school/location typeaheads,
-   demographics, and "how did you hear" all filled hands-off. A same-day
-   Ashby shakeout run verified the react widgets live: location combobox,
-   Boolean Yes/No buttons, and the demographic standing answers.
+   Close + Flipturn (Ashby), and Home Depot (Workday). The Smartsheet run
+   (2026-07-14) exercised the new job-boards UI end to end — education,
+   school/location typeaheads, demographics, and "how did you hear" all
+   filled hands-off. A same-day Ashby shakeout run verified the react widgets
+   live: location combobox, Boolean Yes/No buttons, and the demographic
+   standing answers. The Home Depot run (2026-07-19) was the first Workday
+   submission — it shook out the resume-autofill date correction, Country
+   dropdown matching, and Field of Study typeahead.
 3. Once trusted, set `supervised_mode: false` for hands-off submission.
    Keep `essay_policy: review` — it pauses only on questions the system
    won't answer on its own, which is where auto-generated answers carry
@@ -106,24 +109,26 @@ first contact with a company's form.
 | Piece | Status |
 |---|---|
 | Profile store (both resume tracks) | ✅ built from your two resumes |
-| Intake, ATS detection, JD extraction | ✅ incl. embedded boards + company-from-URL fallback |
+| Intake, ATS detection, JD extraction | ✅ incl. embedded boards + company-from-URL fallback; Workday CXS JSON endpoint (strips a trailing `/apply`); halts+escalates on a blank/thin JD instead of tailoring from nothing |
 | Claude tailoring + anti-fabrication validation | ✅ skills sanitizer, numeric diff, fact-check with one feedback retry |
 | PDF rendering | ✅ one-page auto-fit resume, name-based filenames, HTML fallback |
-| Cover letter + form-answer voice | ✅ first-person enforced everywhere; form answers are pasted verbatim, so a deterministic guard catches "Tyler's profile..." / "listed in my profile" drafts, redrafts once, and holds for review if still wrong |
+| Cover letter + form-answer voice | ✅ first-person enforced everywhere; form answers are pasted verbatim, so a deterministic guard catches "Tyler's profile..." / "listed in my profile" drafts, redrafts once, and holds for review if still wrong; a sanity check also blocks a refusal/too-short letter (e.g. "I'll need the actual job description...") from ever rendering into the PDF |
 | Tracking DB, duplicate detection, CSV export | ✅ only real submissions block re-runs |
 | Escalation queue + notifications (console/ntfy) | ✅ |
 | **Greenhouse handler** | ✅ **live-proven** ×2 (classic + new job-boards React UI incl. education section, school/location async typeaheads) |
 | **Lever handler** | ✅ **live-proven** ×2 (hidden-hcaptcha-button and /thanks-race quirks handled) |
 | **Ashby handler** | ✅ **live-proven** ×2 + widget shakeout (React comboboxes — location typeaheads and static selects — plus Boolean Yes/No buttons, all live-verified 2026-07-14; Date pickers still escalate) |
 | Dropdowns, radios, react-select comboboxes | ✅ profile-first, Claude fallback, review when unsure; radio groups hold when no question text is identifiable |
-| Standing answers that never prompt | ✅ "how did you hear" always resolves to the careers page/site option (any wording, falls back to Other); ethnicity always Hispanic/Latino (variant-tolerant: Latino/Latinx/Latine); "communities you belong to" → None of the above; age 26 resolves range options like "25-34"; relocation, sponsorship, EEO, etc. from profile.yaml |
+| Standing answers that never prompt | ✅ "how did you hear" always resolves to the careers page/site option (any wording, falls back to Other); ethnicity always Hispanic/Latino (variant-tolerant: Latino/Latinx/Latine); "communities you belong to" → None of the above; age 26 resolves range options like "25-34"; preferred contact method → Email; compensation/salary free-text → Negotiable; relocation, sponsorship, EEO, etc. from profile.yaml |
+| Optional fields skipped | ✅ Suffix is never answered or held (left blank) |
 | Consent checkboxes (privacy/certify) | ✅ auto-ticked via strict regex; marketing opt-ins untouched |
 | In-terminal review (`essay_policy: review`) | ✅ accept / edit / type / redraft / skip |
 | Resume-with-answers (`--answers`) | ✅ for phone-driven or escalated runs |
 | Batch mode (`--batch urls.txt`) | ✅ (add pacing before heavy use) |
 | Pending-case viewer (`--pending`) | ✅ |
 | API retry/backoff | ✅ exponential backoff + jitter on 429/5xx/connection errors, honors Retry-After (`anthropic.max_retries`, default 5) |
-| Workday handler | ⬜ (biggest lift) |
+| **Workday handler** | ✅ **live-proven** — full wizard incl. per-tenant account creation, resume-autofill date correction (reads aria-valuenow), Field of Study typeahead, SSO-chooser auth; first supervised submission Home Depot 2026-07-19. Keep supervising until a clean *unattended* run lands. |
+| **SmartRecruiters handler** | 🟡 built (oneclick-ui, DOM captured live from Visa) — **no live run yet**, supervise the first ones. See SMARTRECRUITERS_PLAN.md |
 | Ashby Date pickers ("Pick date..." calendar inputs) | ⬜ skipped by the fill loop, escalate via the required check |
 | Confirmation-email verification (IMAP) | ⬜ optional |
 
@@ -142,7 +147,7 @@ first contact with a company's form.
 ## Testing
 
 ```bash
-python -m pytest tests/ -q    # 79 tests, no API key or browser needed
+python -m pytest tests/ -q    # 142 tests, no API key or browser needed
 ```
 
 ## Notes
