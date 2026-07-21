@@ -89,7 +89,9 @@ standard_answers:
   gender: "Prefer not to say"
   pronouns: "They/them"
   transgender: "Prefer not to say"
-  race_ethnicity: "Prefer not to say"
+  race_ethnicity: "Prefer not to say"   # answers the Hispanic/Latino ETHNICITY question
+  race: "Prefer not to say"             # answers a RACE question when it has no Hispanic/Latino option (US EEO forms split the two)
+  sexual_orientation: "Prefer not to say"
   age: 0
   demographic_communities: "None of the above"
   how_did_you_hear: "Company careers page"

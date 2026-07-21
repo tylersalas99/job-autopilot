@@ -242,14 +242,28 @@ def validate_tailored(cfg: dict, profile: dict, tailored: dict) -> list[str]:
 def draft_cover_letter(cfg: dict, profile: dict, track: str, jd_text: str,
                        title: str, company: str) -> str:
     text = _draft_letter_once(cfg, profile, track, jd_text, title, company)
+    issues = []
     if sounds_third_person(profile, text):
         # The candidate is the author — a letter about "Tyler" / "he" is wrong.
+        issues.append(
+            "referred to the candidate by name or in the third person. The "
+            "candidate is the AUTHOR of this letter — rewrite entirely in first "
+            "person ('I built', 'my work') with no third-person references")
+    if sounds_like_meta_reference(text, company):
+        # Echoing the JD input ("the work <Company> describes", "as described
+        # in the posting") reveals the letter was machine-generated from the
+        # posting (user 2026-07-21). Name the position plainly instead.
+        issues.append(
+            f"referenced the job posting or description as a source (e.g. 'the "
+            f"work {company} describes', 'as described in the posting', 'the role "
+            f"mentions'). State the candidate's own experience directly and name "
+            f"the position plainly — never describe the posting or say what it "
+            f"'describes', 'mentions', 'lists', or 'is looking for'")
+    if issues:
         text = _draft_letter_once(
             cfg, profile, track, jd_text, title, company,
-            feedback=("Your previous draft referred to the candidate by name or "
-                      "in the third person. The candidate is the AUTHOR of this "
-                      "letter. Rewrite entirely in first person ('I built', 'my "
-                      "work') with no third-person references:\n" + text))
+            feedback=("Your previous draft " + "; and it ".join(issues)
+                      + ". Rewrite the letter fixing this:\n" + text))
     return text
 
 
@@ -276,6 +290,55 @@ def sounds_wrong_voice(profile: dict, text: str) -> bool:
     return sounds_third_person(profile, text) or bool(_META_VOICE_RE.search(text))
 
 
+# Describing/soliciting verbs a letter uses when it echoes its JD input
+# instead of stating the candidate's own experience.
+_META_DESCRIBE_VERBS = (
+    r"describe[sd]?|outlin\w+|detail[sed]*|mention[sed]*|list[sed]*|"
+    r"specif\w+|note[sd]?|seek[s]?|want[s]?|require[s]?|ask[s]?|"
+    r"call[s]?\s+for|is\s+looking\s+for|are\s+looking\s+for")
+
+# Generic references to the posting/description/role as a SOURCE.
+_JD_REFERENCE_RE = re.compile(
+    # "as described/listed/outlined in the job/role/posting/description"
+    r"\b(?:as\s+)?(?:" + _META_DESCRIBE_VERBS + r")\s+(?:in|on|by|under|within)\s+"
+    r"(?:the|your|this)\s+(?:job|role|position|posting|listing|description|ad|"
+    r"advertisement|opening|req|write-?up)\b"
+    # "the/your job posting / listing / advertisement / job description"
+    r"|\b(?:the|your|this)\s+(?:job\s+|role\s+|position\s+)?"
+    r"(?:posting|listing|advertisement|write-?up|job\s+description)\b"
+    # "the role/posting/description/team/company describes|mentions|seeks|…"
+    r"|\b(?:the\s+)?(?:role|position|posting|listing|description|job|team|"
+    r"company|opening)\s+(?:" + _META_DESCRIBE_VERBS + r")\b",
+    re.IGNORECASE)
+
+# Company-name suffixes/filler dropped before proximity-matching a describing
+# verb, so "Motorola Solutions describes" is caught via the "Motorola" token.
+_COMPANY_STOPWORDS = {
+    "inc", "llc", "ltd", "corp", "corporation", "co", "the", "company",
+    "solutions", "group", "technologies", "technology", "systems", "services",
+    "global", "holdings", "labs", "studios", "studio", "and"}
+
+
+def sounds_like_meta_reference(text: str, company: str = "") -> bool:
+    """True when the letter references the job posting/description/role as a
+    SOURCE ('the role describes', 'as described in the posting', 'the work
+    <Company> describes') — a tell that the model is echoing its JD input
+    rather than writing as a candidate. (user 2026-07-21: the Motorola cover
+    letter leaked 'the data migration work Motorola Solutions describes'.)
+    A candidate names the position plainly and states their own experience;
+    they never say what the posting 'describes', 'mentions', or 'lists'."""
+    if _JD_REFERENCE_RE.search(text):
+        return True
+    for tok in re.findall(r"[A-Za-z]{3,}", company or ""):
+        if tok.lower() in _COMPANY_STOPWORDS:
+            continue
+        # "<CompanyToken> [up to 3 words] describes/mentions/seeks/…"
+        if re.search(re.escape(tok) + r"\W+(?:\w+\W+){0,3}?(?:"
+                     + _META_DESCRIBE_VERBS + r")\b", text, re.IGNORECASE):
+            return True
+    return False
+
+
 def _draft_letter_once(cfg: dict, profile: dict, track: str, jd_text: str, title: str,
                        company: str, feedback: str | None = None) -> str:
     resp = _create(
@@ -284,7 +347,9 @@ def _draft_letter_once(cfg: dict, profile: dict, track: str, jd_text: str, title
         max_tokens=1200,
         system=(
             "Write a professional cover letter that sounds like a strong candidate "
-            "wrote it, not an AI. Three paragraphs, under 220 words, plain text only.\n\n"
+            "wrote it, not an AI. Two or three short paragraphs, under 180 words, "
+            "plain text only. Be concise — every sentence earns its place; cut "
+            "throat-clearing, filler, and any restating of the obvious.\n\n"
             "VOICE RULES — all of them:\n"
             "- FIRST PERSON, always: the candidate is the author. 'I built', 'my "
             "work'. NEVER refer to the candidate by name or in the third person "
@@ -303,6 +368,11 @@ def _draft_letter_once(cfg: dict, profile: dict, track: str, jd_text: str, title
             "'while I haven't', 'new to', or any aspirational framing that concedes "
             "a shortfall.\n"
             "- Do NOT parrot the job description's marketing language back at it.\n"
+            "- NEVER reference the job posting or description as a source. Do not "
+            "write 'the role describes', 'the work X describes', 'as described in "
+            "the posting', or say what the company/role 'mentions', 'lists', "
+            "'outlines', or 'is looking for'. State your own experience directly "
+            "and name the position plainly (e.g. 'this Data Conversion role').\n"
             "- At most one em dash in the whole letter. No semicolons.\n"
             "- Banned phrases and patterns: 'I am writing to express', 'passionate', "
             "'excited to', 'leverage', 'aligns with', 'exactly the kind of', "
@@ -336,7 +406,50 @@ def _draft_letter_once(cfg: dict, profile: dict, track: str, jd_text: str, title
     # Safety net: a name placeholder must never reach a real letter.
     text = re.sub(r"\[\s*(?:candidate\s*|your\s*|full\s*)*name\s*\]",
                   profile["identity"]["full_name"], text, flags=re.IGNORECASE)
-    return strip_greeting_signoff(text)
+    return strip_greeting_signoff(strip_preamble(text))
+
+
+# Horizontal-rule fence ("---", "***", "___") the model uses to separate its
+# preamble from the letter. A real letter never opens with one.
+_HRULE_RE = re.compile(r"^\s*[-*_]{3,}\s*$")
+# A leading line that is model chatter / an instruction restatement, not the
+# letter itself.
+_PREAMBLE_LINE_RE = re.compile(
+    r"here(?:'s| is| are)\b[^.\n]*\bletter\b"              # "here is the letter:"
+    r"|^\s*(?:sure|certainly|absolutely|of course|okay|ok)\b"  # "Sure, ..."
+    r"|\bplain[\s-]+(?:body[\s-]+)?text\b"                 # "plain body text"
+    r"|\bunder\s+\d+\s+words\b"                            # "under 220 words"
+    r"|\b(?:one|two|three|four|\d+)\s+paragraphs?\b",      # "Three paragraphs"
+    re.IGNORECASE)
+
+
+def strip_preamble(text: str) -> str:
+    """Drop any model preamble before the letter body — an instruction
+    restatement and/or a 'here is the letter:' lead-in, optionally fenced off
+    with a '---' rule. (Sony run 2026-07-21 rendered 'Three paragraphs, under
+    220 words, plain body text — here is the letter:\\n---' straight into the
+    PDF under 'Dear Hiring Manager,'.) A real letter has no horizontal rule or
+    format-preamble at the top, so this only ever removes leaked scaffolding."""
+    lines = text.split("\n")
+    nonempty = [i for i, l in enumerate(lines) if l.strip()]
+    # 1) An early horizontal rule fences the preamble off — drop through it,
+    #    but ONLY when every line before the rule is itself preamble (so a
+    #    stray rule inside real body prose can never eat the letter).
+    for i in nonempty[:3]:
+        if _HRULE_RE.match(lines[i]):
+            before = [lines[j] for j in nonempty if j < i]
+            if all(_PREAMBLE_LINE_RE.search(b) for b in before):
+                lines = lines[i + 1:]
+            break
+    # 2) Peel any leading preamble/rule lines the model left unfenced.
+    while lines:
+        first = lines[0].strip()
+        if not first:
+            lines.pop(0); continue
+        if _HRULE_RE.match(lines[0]) or _PREAMBLE_LINE_RE.search(first):
+            lines.pop(0); continue
+        break
+    return "\n".join(lines).strip()
 
 
 _GREETING_RE = re.compile(r"^(?:dear|hello|hi|greetings)\b[^\n]*\n+", re.IGNORECASE)

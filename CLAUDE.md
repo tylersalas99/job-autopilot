@@ -50,7 +50,14 @@ of failure already handled.
   in-terminal at each held question for accept/edit; it automatically falls
   back to escalation when there is no interactive terminal (phone runs), so
   remote runs land in `pending/` — resume them with `--answers`.
-- Tailored documents: `output/<company>_<title>/`
+- Tailored documents: `output/<NNN>_<MMDDYYYY>_<company>_<title>/` (user
+  2026-07-21) — a zero-padded sequential run id, the run date, then the
+  readable posting slug. `application_dir` in main.py assigns the next id
+  across the output dir and reuses a posting's existing folder on re-runs
+  (id/date pinned to the first run, docs overwrite in place). Legacy
+  un-prefixed folders are reused as-is. Existing folders were migrated
+  001–019 by creation date; the tracking DB's stored paths were rewritten
+  to match.
 - Escalated cases: `pending/` (each has case.json, screenshot.png, page.html)
 - Tracking: `python main.py --status` or `--export report.csv`
 - Batch: `python main.py --batch urls.txt` (one URL per line; failures are isolated)
@@ -100,6 +107,28 @@ of failure already handled.
   third-person detector that auto-redrafts once), then 'Sincerely, Tyler
   Salas'. Greetings/sign-offs the model emits are stripped deterministically.
   Don't add them back via the prompt.
+- **Model preamble/fence is stripped before render** (`strip_preamble` in
+  tailoring/resume.py, runs before `strip_greeting_signoff`): the Sony run
+  (2026-07-21) rendered "Three paragraphs, under 220 words, plain body text
+  — here is the letter:\n---" straight into the PDF under 'Dear Hiring
+  Manager,'. It drops a leading instruction-restatement / "here is the
+  letter:" lead-in and an early "---"/"***"/"___" fence — but only when
+  every line before the fence is itself preamble, so a stray rule inside real
+  prose can never eat the letter. A real letter has no format-preamble or
+  horizontal rule at the top.
+- **The letter must never echo its JD input** (user 2026-07-21: the Motorola
+  letter leaked "the data migration work Motorola Solutions describes" —
+  visibly machine-written from the posting). `sounds_like_meta_reference`
+  in tailoring/resume.py flags any reference to the posting/description/role
+  as a SOURCE ("the role describes", "as described in the posting", "<Company>
+  describes/mentions/lists/is looking for") — the company check matches on
+  the company's distinctive tokens, so suffixes like "Solutions"/"Inc" don't
+  hide it. It shares `draft_cover_letter`'s single redraft with the
+  third-person detector (both issues fold into one feedback pass). The prompt
+  also bans posting-references explicitly and now targets under 180 words
+  ("name the position plainly", e.g. "this Data Conversion role"). Naming the
+  role or the company's customers is fine; saying what the posting "describes"
+  is not.
 - **Form answers are pasted VERBATIM, so voice is enforced** (user
   2026-07-14): `draft_field_answer` drafts must be first person and never
   mention the profile/resume/mechanics ("Tyler's profile is...", "listed
@@ -130,6 +159,14 @@ of failure already handled.
   ≥2 tokens) because option text reformats names ("University Texas -
   El Paso", "El Paso, Texas, United States"). Fuzzy matching is opt-in for
   these pickers ONLY — never for yes/no or generic choice questions.
+  **The location picker is fed STATE/COUNTRY-qualified candidates only,
+  never the bare city** (`_location_candidates` in handlers/greenhouse.py:
+  "El Paso, Texas, United States" → "El Paso, Texas" → "El Paso, TX"). A
+  bare "El Paso" substring-matched BOTH the US city and "El Paso, Cesar,
+  Colombia", and `match_option`'s shortest-superset rule then picked the
+  shorter foreign option — the Sony run (2026-07-21) submitted a Colombian
+  city. Every candidate now carries the state name ("Texas"), so the US
+  option is the only possible match, and "TX" won't token-match "Texas".
 - **Label `for` attributes can be NUMERIC** ("326" on demographic
   questions) — `#326` is invalid CSS; always select via `[id='...']`.
   Those numeric-id fields are react-select comboboxes: `_fill_labeled_inputs`
@@ -162,7 +199,19 @@ of failure already handled.
   option wording varies ("Hispanic or Latine", "Latinx"), so
   `ethnicity_option_index` in base.py variant-matches when exact matching
   fails (a miss once fell through to Claude, which picked "I prefer not
-  to answer"). "Which communities do you belong to?" surveys answer
+  to answer"). US EEO forms SPLIT ethnicity from RACE, though: the SIE race
+  question (2026-07-21) listed White/Black/Asian/… with NO Hispanic option,
+  so `ethnicity_option_index` found nothing and Claude picked "I don't wish
+  to answer". `answer_choice` now falls back to the `race` standing answer
+  ("White", `standard_answers.race`) when the Hispanic/Latino option is
+  absent — the Hispanic-present case still answers Hispanic/Latino.
+  Sexual Orientation → "Heterosexual" (`standard_answers.sexual_orientation`,
+  user 2026-07-21; its `choice_value` row sits above the gender row).
+  Relationship/nepotism disclosures — "Are you related to, or in a close
+  personal relationship with, anyone who works for <company>?" → No (user
+  2026-07-21; the `choice_value` pattern requires a work/employer context so
+  it can't catch a "describe your working relationship" essay).
+  "Which communities do you belong to?" surveys answer
   "None of the above" (`demographic_communities` in profile.yaml).
   Age is 26 (`standard_answers.age`); range options ("25-34") resolve via
   `age_option_index`, and the age row sits BELOW the over-18 row so
@@ -171,8 +220,17 @@ of failure already handled.
   website questions answer with the GitHub URL (both in profile.yaml
   identity). Free-text relocation questions always answer with
   `standard_answers.relocation_answer` ("...willing to relocate"); choice
-  relocation questions answer Yes. The profile email tylersalas66@gmail.com
-  is correct (deliberately different from the user's Claude account email).
+  relocation questions answer Yes. Employee-referral questions (Tyler has
+  NO contacts at other companies, user 2026-07-21): the referrer's NAME is
+  left BLANK (free-text — never drafted by Claude, never held) and yes/no
+  "were you referred by an employee?" answers No. `_EMPLOYEE_REFERRAL_RE` in
+  base.py is deliberately NARROWER than `_HEAR_ABOUT_RE`'s bare "referr" and
+  is checked first in both `choice_value` and `answer_custom_question`, plus
+  excluded from the hear-about careers fallback and the Workday source
+  picker — so a "How did you hear about us?" that merely lists a "Referral"
+  option still resolves to the careers page. The profile email
+  tylersalas66@gmail.com is correct (deliberately different from the user's
+  Claude account email).
 - **School pickers type each `school_aliases` entry as a separate search**
   when the canonical name returns no results — Greenhouse's school DB
   entry is "University of Texas - El Paso" and finds nothing for "The

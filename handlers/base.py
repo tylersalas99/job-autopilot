@@ -32,6 +32,23 @@ _IGNORE_CHOICE_RE = re.compile(r"\bsuffix\b", re.I)
 # "How did you hear about us?" in any phrasing
 _HEAR_ABOUT_RE = re.compile(r"how did you (hear|find)|hear about|referr", re.I)
 
+# Employee-referral questions — Tyler has NO contacts at other companies
+# (user directive 2026-07-21). The referrer's name is left BLANK (free-text)
+# and yes/no "were you referred by an employee?" answers No. This is
+# deliberately NARROWER than _HEAR_ABOUT_RE's bare "referr": a "How did you
+# hear about us?" question that merely lists a "Referral" option is still a
+# source question, not an employee-contact ask, and must keep resolving to
+# the careers page — so employee-referral is excluded from that fallback.
+_EMPLOYEE_REFERRAL_RE = re.compile(
+    r"referred\s+by\b"                        # "Were you referred by ...?"
+    r"|\breferrer\b"                          # "Referrer name"
+    r"|who\s+referred\s+you"                  # "Who referred you?"
+    r"|\breferr\w*\b[^?]{0,30}\bemployee\b"   # "referral ... employee"
+    r"|\bemployee\b[^?]{0,30}\breferr\w*\b"   # "employee ... referral"
+    r"|name[^?]{0,30}\breferr\w*"             # "name of the person who referred you"
+    r"|know\s+(any|some)one\s+(who\s+(currently\s+)?works?|employed|at\b)",  # "know anyone at ..."
+    re.I)
+
 
 @dataclass
 class RunResult:
@@ -165,6 +182,13 @@ class BaseHandler:
         std = self.profile["standard_answers"]
         q = question.lower()
 
+        # Employee-referral yes/no ("Were you referred by an employee?") → No
+        # (user 2026-07-21: no contacts at other companies). Checked before the
+        # hear-about row below so its "referr" pattern can't answer it with the
+        # careers-page source value.
+        if _EMPLOYEE_REFERRAL_RE.search(question):
+            return "No"
+
         def yn(flag) -> str:
             return "Yes" if flag else "No"
 
@@ -176,6 +200,15 @@ class BaseHandler:
             # shadowing the authorization row below.
             (r"^\W*country\b\W*$|country of (residence|citizenship)",
              self.profile["identity"].get("country")),
+            # Nepotism/relationship disclosure — "Are you related to, or in a
+            # close personal relationship with, anyone who works for <company>?"
+            # → No (SIE run 2026-07-21; Tyler has no relatives/partners at other
+            # companies, consistent with the no-contacts referral directive).
+            # Requires an employee/works-for context so it can't catch a
+            # "describe your working relationship" essay.
+            (r"(?:\brelated to\b|personal relationship|\brelative\b|"
+             r"family member)[^?]{0,120}(work|employ|studio|compan|organi|staff)",
+             "No"),
             (r"sponsor", yn(std.get("require_sponsorship", False))),
             (r"non.?comp|non.?solicit|agreement .*(restrict|former employer)",
              yn(std.get("has_noncompete", False))),
@@ -205,6 +238,10 @@ class BaseHandler:
             (r"communit(?:y|ies).*belong|belong.*communit",
              std.get("demographic_communities")),
             (r"pronoun", std.get("pronouns")),
+            # Sexual Orientation → Heterosexual (SIE run 2026-07-21; the Claude
+            # fallback had suggested "I don't wish to answer"). Above the gender
+            # row for clarity — "sexual" won't trip \bsex\b, but keep it first.
+            (r"sexual orientation", std.get("sexual_orientation")),
             # MUST precede the gender row: "transgender" contains "gender"
             # and would otherwise be answered with the gender value.
             (r"transgender", std.get("transgender")),
@@ -386,6 +423,15 @@ class BaseHandler:
             # inside "... (Not Hispanic or Latino)" (Red Hat 2026-07-18).
             if re.search(r"hispanic|latin[oaex]", desired, re.I):
                 idx = self.ethnicity_option_index(options)
+                # US EEO forms split ethnicity (Hispanic/Latino) from RACE:
+                # the SIE race question (2026-07-21) offered White/Black/
+                # Asian/… with NO Hispanic option, so ethnicity_option_index
+                # found nothing and the answer fell to Claude ("I don't wish
+                # to answer"). Fall back to the race standing answer (White).
+                if idx is None:
+                    race = self.profile["standard_answers"].get("race")
+                    if race:
+                        idx = self.match_option(race, options)
             # Veteran also needs its specialized matcher BEFORE containment:
             # "a veteran, but I am not a protected veteran" CONTAINS the
             # standing answer, so containment picked it (Travelers
@@ -394,7 +440,8 @@ class BaseHandler:
                 idx = self.veteran_option_index(options)
             if idx is None:
                 idx = self.match_option(desired, options)
-            if idx is None and _HEAR_ABOUT_RE.search(question):
+            if idx is None and _HEAR_ABOUT_RE.search(question) \
+                    and not _EMPLOYEE_REFERRAL_RE.search(question):
                 idx = self.careers_option_index(options)
             if idx is None and desired.isdigit() \
                     and re.search(r"\bage\b|how old", question, re.I):
@@ -809,6 +856,12 @@ class BaseHandler:
             if reloc:
                 return {"answer": reloc, "confidence": "high",
                         "is_essay": False, "hold": False, "source": "profile"}
+        # Standing answer: employee-referral name fields are left BLANK (user
+        # 2026-07-21: no contacts at other companies) — never drafted by Claude
+        # (which would invent a name) and never held.
+        if _EMPLOYEE_REFERRAL_RE.search(question):
+            return {"answer": "", "confidence": "high",
+                    "is_essay": False, "hold": False, "source": "profile"}
         # Standing answer: free-text "how did you hear about us" (user
         # directive 2026-07-14 — choice variants already resolve via
         # choice_value; this covers the text-input variant).

@@ -64,8 +64,16 @@ class GreenhouseHandler(BaseHandler):
         # --- Location (City): required react-select typeahead on job-boards
         # forms. Type the city and pick the suggested match ("El Paso" →
         # "El Paso, Texas, United States").
+        #
+        # State/country-qualified candidates ONLY — never a bare city name.
+        # On the Sony run (2026-07-21) the bare "El Paso" candidate matched
+        # BOTH "El Paso, Texas, United States" and "El Paso, Cesar, Colombia";
+        # match_option's shortest-superset rule then picked the shorter
+        # foreign option, so the form was submitted with a Colombian city.
+        # Including the state ("Texas") in the matched text makes the US
+        # option the only substring hit, and "TX" won't token-match "Texas".
         self._pick_react_option(page, "candidate-location",
-                                [ident.get("city"), ident.get("location")],
+                                self._location_candidates(ident),
                                 type_first=True, fuzzy=True)
 
         # --- education section (job-boards UI), from profile['education'] ---
@@ -182,6 +190,31 @@ class GreenhouseHandler(BaseHandler):
         opts = page.query_selector_all(f"[id^='react-select-{input_id}-option']")
         pairs = [(o, (o.inner_text() or "").strip()) for o in opts if o.is_visible()]
         return [(o, t) for o, t in pairs if t]
+
+    @staticmethod
+    def _location_candidates(ident: dict) -> list[str]:
+        """State/country-qualified location strings for the react-select
+        location typeahead, most-specific first. A bare city ("El Paso")
+        must never be a candidate: it substring-matches foreign cities of
+        the same name and match_option's shortest-superset rule then picks
+        the wrong one (Sony run 2026-07-21 → "El Paso, Cesar, Colombia").
+        Every candidate here carries the state name, so the US option is
+        the only possible match. The city/state_full/country fields are the
+        typed queries too, and "El Paso, Texas" reliably surfaces the US
+        city in Greenhouse's location search."""
+        city = (ident.get("city") or "").strip()
+        state_full = (ident.get("state_full") or "").strip()
+        country = (ident.get("country") or "").strip()
+        loc = (ident.get("location") or "").strip()  # e.g. "El Paso, TX"
+        out: list[str] = []
+        for c in (
+            f"{city}, {state_full}, {country}" if city and state_full and country else "",
+            f"{city}, {state_full}" if city and state_full else "",
+            loc if "," in loc else "",  # keep only if it carries a region tail
+        ):
+            if c and c not in out:
+                out.append(c)
+        return out
 
     @classmethod
     def _typeahead_queries(cls, candidates: list[str]) -> list[str]:

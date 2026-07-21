@@ -33,7 +33,7 @@ python main.py <job-url> --answers pending/<case>/approved_answers.json
                                       # reviewed/edited answers
 ```
 
-Generated documents land in `output/<company>_<title>/` as
+Generated documents land in `output/<NNN>_<MMDDYYYY>_<company>_<title>/` as
 `TylerSalas-Resume.pdf` (auto-fit to one page) and
 `TylerSalas-CoverLetter.pdf`. Escalated cases land in
 `pending/<timestamp>_<company>/` with a screenshot, the page HTML, and a
@@ -112,14 +112,14 @@ first contact with a company's form.
 | Intake, ATS detection, JD extraction | ✅ incl. embedded boards + company-from-URL fallback; Workday CXS JSON endpoint (strips a trailing `/apply`); halts+escalates on a blank/thin JD instead of tailoring from nothing |
 | Claude tailoring + anti-fabrication validation | ✅ skills sanitizer, numeric diff, fact-check with one feedback retry |
 | PDF rendering | ✅ one-page auto-fit resume, name-based filenames, HTML fallback |
-| Cover letter + form-answer voice | ✅ first-person enforced everywhere; form answers are pasted verbatim, so a deterministic guard catches "Tyler's profile..." / "listed in my profile" drafts, redrafts once, and holds for review if still wrong; a sanity check also blocks a refusal/too-short letter (e.g. "I'll need the actual job description...") from ever rendering into the PDF |
+| Cover letter + form-answer voice | ✅ first-person enforced everywhere; form answers are pasted verbatim, so a deterministic guard catches "Tyler's profile..." / "listed in my profile" drafts, redrafts once, and holds for review if still wrong; the letter also can't echo its JD input (references like "the work X describes" / "as described in the posting" trigger a redraft) and any leaked model preamble or "---" fence is stripped before rendering (targets under 180 words); a sanity check also blocks a refusal/too-short letter (e.g. "I'll need the actual job description...") from ever rendering into the PDF |
 | Tracking DB, duplicate detection, CSV export | ✅ only real submissions block re-runs |
 | Escalation queue + notifications (console/ntfy) | ✅ |
 | **Greenhouse handler** | ✅ **live-proven** ×2 (classic + new job-boards React UI incl. education section, school/location async typeaheads) |
 | **Lever handler** | ✅ **live-proven** ×2 (hidden-hcaptcha-button and /thanks-race quirks handled) |
 | **Ashby handler** | ✅ **live-proven** ×2 + widget shakeout (React comboboxes — location typeaheads and static selects — plus Boolean Yes/No buttons, all live-verified 2026-07-14; Date pickers still escalate) |
 | Dropdowns, radios, react-select comboboxes | ✅ profile-first, Claude fallback, review when unsure; radio groups hold when no question text is identifiable |
-| Standing answers that never prompt | ✅ "how did you hear" always resolves to the careers page/site option (any wording, falls back to Other); ethnicity always Hispanic/Latino (variant-tolerant: Latino/Latinx/Latine); "communities you belong to" → None of the above; age 26 resolves range options like "25-34"; preferred contact method → Email; compensation/salary free-text → Negotiable; relocation, sponsorship, EEO, etc. from profile.yaml |
+| Standing answers that never prompt | ✅ "how did you hear" always resolves to the careers page/site option (any wording, falls back to Other); ethnicity always Hispanic/Latino (variant-tolerant: Latino/Latinx/Latine), and a race question with no Hispanic option falls back to `race` (White); sexual orientation → Heterosexual; relationship/nepotism ("related to anyone who works here?") → No; employee-referral questions leave the referrer name blank and answer "referred by an employee?" No; "communities you belong to" → None of the above; age 26 resolves range options like "25-34"; preferred contact method → Email; compensation/salary free-text → Negotiable; relocation, sponsorship, EEO, etc. from profile.yaml |
 | Optional fields skipped | ✅ Suffix is never answered or held (left blank) |
 | Consent checkboxes (privacy/certify) | ✅ auto-ticked via strict regex; marketing opt-ins untouched |
 | In-terminal review (`essay_policy: review`) | ✅ accept / edit / type / redraft / skip |
@@ -147,7 +147,7 @@ first contact with a company's form.
 ## Testing
 
 ```bash
-python -m pytest tests/ -q    # 142 tests, no API key or browser needed
+python -m pytest tests/ -q    # 145 tests, no API key or browser needed
 ```
 
 ## Notes

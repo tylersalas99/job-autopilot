@@ -125,7 +125,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-from handlers.base import (_HEAR_ABOUT_RE, _IGNORE_CHOICE_RE, _PLACEHOLDER_OPTION,
+from handlers.base import (_EMPLOYEE_REFERRAL_RE, _HEAR_ABOUT_RE,
+                           _IGNORE_CHOICE_RE, _PLACEHOLDER_OPTION,
                            BaseHandler, RunResult)
 
 # Dropdown button text that means "nothing chosen yet"
@@ -860,8 +861,9 @@ class WorkdayHandler(BaseHandler):
                 if key:
                     seen_inputs.add(key)
                 question = self.question_for(page, inp or cont)
-                if not question or not _HEAR_ABOUT_RE.search(question):
-                    continue
+                if not question or not _HEAR_ABOUT_RE.search(question) \
+                        or _EMPLOYEE_REFERRAL_RE.search(question):
+                    continue  # employee-referral widgets → generic pass answers No
                 (inp or cont).click()
                 pairs = self._poll_options(page, 2500)
                 if not pairs and inp:

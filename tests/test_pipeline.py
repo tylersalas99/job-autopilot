@@ -167,6 +167,71 @@ def test_third_person_detection():
                  "My projects extend that pattern, and I would welcome a conversation.")
 
 
+def test_application_dir_naming(tmp_path):
+    from datetime import datetime
+    from main import application_dir
+    out = tmp_path / "output"
+    out.mkdir()
+    (out / "005_07122026_foo_bar").mkdir()          # existing prefixed run
+    (out / "baz_qux").mkdir()                        # legacy un-prefixed run
+    today = datetime.now().strftime("%m%d%Y")
+
+    # brand-new posting: next id after 005, today's date, readable slug
+    new = application_dir(out, "New Co", "Backend Engineer")
+    assert new.name == f"006_{today}_new-co_backend-engineer"
+    assert not new.exists()                          # resolved, not created
+
+    # re-run of an existing prefixed posting reuses its folder (id/date pinned)
+    assert application_dir(out, "foo", "bar").name == "005_07122026_foo_bar"
+    # legacy un-prefixed folder is reused as-is, never duplicated
+    assert application_dir(out, "baz", "qux").name == "baz_qux"
+
+
+def test_meta_reference_detection():
+    from tailoring.resume import sounds_like_meta_reference
+    co = "Motorola Solutions, Inc."
+    # JD-input leaks — must flag (the real Motorola leak + variants)
+    assert sounds_like_meta_reference(
+        "The data migration work Motorola Solutions describes maps closely to "
+        "what I do.", co)
+    assert sounds_like_meta_reference("This matches what the role describes.")
+    assert sounds_like_meta_reference("I bring what the posting is looking for.")
+    assert sounds_like_meta_reference("as described in the job posting, I built ...")
+    assert sounds_like_meta_reference("Your job description mentions data conversion.")
+    # Clean letters — must NOT flag: naming the position and stating own work
+    assert not sounds_like_meta_reference(
+        "That experience maps closely to this Data Conversion role.", co)
+    assert not sounds_like_meta_reference(
+        "I would welcome the opportunity to discuss how I would contribute to the "
+        "Data Conversion team and support Motorola's public safety customers.", co)
+    assert not sounds_like_meta_reference(
+        "I noted improvements in throughput after refactoring the pipeline.", co)
+
+
+def test_strip_preamble():
+    from tailoring.resume import strip_preamble
+    # The real Sony leak: instruction restatement + '---' fence before the body
+    sony = ("Three paragraphs, under 220 words, plain body text — here is the "
+            "letter:\n\n---\n\nMy work at El Paso Water Utilities has centered on "
+            "building software.")
+    out = strip_preamble(sony)
+    assert out.startswith("My work at El Paso Water")
+    assert "---" not in out and "here is the letter" not in out.lower()
+    assert "paragraphs" not in out.lower()
+    # Other leak shapes
+    assert strip_preamble("Sure, here is the letter:\n\n---\n\nReal body.") == "Real body."
+    assert strip_preamble("---\n\nReal body.") == "Real body."
+    assert strip_preamble("Here's the letter:\nReal body.") == "Real body."
+    # A clean letter is untouched, including a stray rule inside real prose
+    clean = ("At El Paso Water Utilities, I built pipelines operations teams rely "
+             "on daily.\n\nA second substantive paragraph of real content here.")
+    assert strip_preamble(clean) == clean
+    body_rule = ("I built pipelines operations teams rely on daily across the "
+                 "utility.\n\nMore real substantive content in a second paragraph.\n\n"
+                 "---\n\nlate rule")
+    assert strip_preamble(body_rule).startswith("I built pipelines")
+
+
 def test_strip_greeting_signoff():
     from tailoring.resume import strip_greeting_signoff
     text = ("Dear Hiring Manager,\n\nI am applying for the role. Body continues "

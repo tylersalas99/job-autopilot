@@ -13,6 +13,7 @@ import argparse
 import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -44,6 +45,37 @@ def load_config() -> dict:
 
 def slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (text or "unknown").lower()).strip("-")[:50]
+
+
+# Run folders are '<NNN>_<MMDDYYYY>_<company>_<title>' (user 2026-07-21):
+# a zero-padded sequential id, the run date, then the readable posting slug.
+_RUN_DIR_RE = re.compile(r"^(\d{3,})_(\d{8})_(.*)$")
+
+
+def application_dir(output_root: Path, company: str, title: str) -> Path:
+    """Resolve the output folder for a posting.
+
+    Re-running the SAME posting reuses its existing folder (idempotent — the
+    id and date stay pinned to the first run, and documents overwrite in
+    place, exactly like the old '<company>_<title>' scheme). A NEW posting
+    gets the next sequential id across the whole output dir and today's date.
+    """
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    base = f"{slug(company)}_{slug(title)}"
+    max_id = 0
+    for d in sorted(output_root.iterdir()):
+        if not d.is_dir():
+            continue
+        m = _RUN_DIR_RE.match(d.name)
+        if m:
+            max_id = max(max_id, int(m.group(1)))
+            if m.group(3) == base:
+                return d  # this posting already has a folder — reuse it
+        elif d.name == base:
+            return d  # legacy un-prefixed folder (pre-migration) — reuse as-is
+    stamp = datetime.now().strftime("%m%d%Y")
+    return output_root / f"{max_id + 1:03d}_{stamp}_{base}"
 
 
 def check_profile_todos(profile: dict) -> list[str]:
@@ -121,7 +153,8 @@ def run(url: str, dry_run: bool, answers_file: str | None = None) -> int:
         print(f"✗ Job description missing/thin → {case}")
         return 1
 
-    app_dir = ROOT / cfg["paths"]["output_dir"] / f"{slug(posting.company)}_{slug(posting.title)}"
+    app_dir = application_dir(ROOT / cfg["paths"]["output_dir"],
+                              posting.company, posting.title)
     app_dir.mkdir(parents=True, exist_ok=True)
     (app_dir / "jd.txt").write_text(
         f"{posting.title}\n{posting.company}\n{posting.final_url}\n\n{posting.description}",
